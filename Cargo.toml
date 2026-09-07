@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members  = ["crates/*"]
+exclude  = ["vendor"]
+
+[workspace.package]
+edition      = "2024"
+rust-version = "1.97"
+repository   = "https://github.com/kjanat/fsql"
+license      = "MIT"
+
+[workspace.dependencies]
+fsql      = { path = "crates/fsql" }
+sqlparser = { path = "vendor/sqlparser" }

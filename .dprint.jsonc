@@ -1,0 +1,20 @@
+{
+	"extends": "https://cdn.jsdelivr.net/gh/kjanat/kjanat/configs/dprint.remote.json",
+	"exec": {
+		"commands": [
+			{ "command": "rustfmt --edition 2024", "exts": ["rs"] },
+			{ "command": "tombi format - --stdin-filename {{file_path}}", "exts": ["toml"] },
+			{ "command": "shfmt -i 0 -ln bash -bn -ci -filename {{file_path}}", "exts": ["sh", "bash"] },
+			{ "command": "just --dump --justfile {{file_path}}", "fileNames": ["justfile"] },
+		],
+	},
+	"excludes": [
+		"**/target",
+		"**/node_modules",
+		"**/{*-,bun}lock(.*)?",
+		"vendor/**",
+	],
+	"plugins": [
+		"npm:@dprint/exec@0.7.3/plugin.json@704701df449dd7e942a71144773778ac529d68c2e4657bfc236d393b898b9a67",
+	],
+}
