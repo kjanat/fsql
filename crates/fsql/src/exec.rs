@@ -11,12 +11,13 @@ use sqlparser::ast::{
 use crate::column::Table;
 use crate::error::{Error, Result};
 use crate::eval::{Evaluator, Row, is_aggregate, render};
+use crate::execution::{Completion, Control, ErrorPolicy, ExecutionOptions, row_bytes};
 use crate::output::ResultSet;
 use crate::plan::{
     Cte, JoinKind, JoinSpec, OrderKey, Planner, Projection, QueryPlan, Relation, SelectPlan,
     SetBody, SetOp, Source,
 };
-use crate::value::Value;
+use crate::value::{Value, ValueKey, row_key};
 use crate::walk::Walker;
 
 pub struct MapRow(pub HashMap<String, Value>);
@@ -151,21 +152,32 @@ pub type RowStream<'a> = Box<dyn Iterator<Item = Result<Box<dyn Row + 'a>>> + 'a
 pub struct Context {
     pub planner: Planner,
     pub sink: RefCell<Vec<Error>>,
+    pub(crate) control: Control,
 }
 
 type Scope = HashMap<String, Rc<ResultSet>>;
 
 pub fn base_rows<'a>(source: &Source) -> Result<RowStream<'a>> {
+    base_rows_cancellable(source, &crate::CancellationToken::default())
+}
+
+fn base_rows_cancellable<'a>(
+    source: &Source,
+    cancellation: &crate::CancellationToken,
+) -> Result<RowStream<'a>> {
+    if source.table == Table::Mounts {
+        return crate::mounts::rows();
+    }
+    let walker = Walker::cancellable(&source.root, source.options.clone(), cancellation)?;
     match source.table {
         Table::Files => {
-            let walker = Walker::new(&source.root, source.options.clone())?;
             Ok(Box::new(walker.map(|entry| {
                 entry.map(|entry| Box::new(entry) as Box<dyn Row + 'a>)
             })))
         }
-        Table::Mounts => crate::mounts::rows(),
-        Table::Xattrs => crate::xattr::rows(source),
-        Table::Acls => crate::xattr::acl_rows(source),
+        Table::Xattrs => Ok(crate::xattr::rows_from(walker)),
+        Table::Acls => Ok(crate::xattr::acls_from(walker)),
+        Table::Mounts => unreachable!(),
     }
 }
 
@@ -174,17 +186,164 @@ pub fn run(
     planner: &Planner,
     errors: &mut dyn FnMut(Error),
 ) -> Result<ResultSet> {
+    crate::bind::query(plan, planner)?;
+    if plan.limit == Some(0) {
+        return Ok(ResultSet {
+            headers: crate::bind::query(plan, planner)?,
+            rows: Vec::new(),
+        });
+    }
     let ctx = Rc::new(Context {
         planner: planner.clone(),
         sink: RefCell::new(Vec::new()),
+        control: Control::new(ExecutionOptions::default()),
     });
     let result = run_query(plan, &ctx, &Scope::new(), None);
     drain(&ctx, errors);
     result
 }
 
-fn report(ctx: &Context, error: Error) {
-    ctx.sink.borrow_mut().push(error);
+fn report(ctx: &Context, error: Error) -> Result<()> {
+    if ctx.control.options.error_policy == ErrorPolicy::Strict {
+        return Err(error);
+    }
+    let mut sink = ctx.sink.borrow_mut();
+    if sink.len() >= ctx.control.options.max_diagnostics {
+        return Err(Error::ResourceLimit("diagnostic budget exceeded".into()));
+    }
+    sink.push(error);
+    Ok(())
+}
+
+pub fn run_with_options(
+    plan: &QueryPlan,
+    planner: &Planner,
+    options: ExecutionOptions,
+) -> Result<(ResultSet, Completion)> {
+    let headers = crate::bind::query(plan, planner)?;
+    let ctx = Rc::new(Context {
+        planner: planner.clone(),
+        sink: RefCell::new(Vec::new()),
+        control: Control::new(options),
+    });
+    ctx.control.step()?;
+    if plan.limit == Some(0) {
+        return Ok((
+            ResultSet {
+                headers,
+                rows: Vec::new(),
+            },
+            Completion::default(),
+        ));
+    }
+    let set = run_query(plan, &ctx, &Scope::new(), None)?;
+    let completion = Completion {
+        rows: set.rows.len(),
+        diagnostics: ctx.sink.take(),
+    };
+    Ok((set, completion))
+}
+
+/// Emit simple scans without collecting their output. More complex queries use
+/// the same budgeted executor as `run_with_options`.
+pub type RowSink<'a> = dyn FnMut(&[String], &[Value]) -> Result<std::ops::ControlFlow<()>> + 'a;
+
+pub fn stream(
+    plan: &QueryPlan,
+    planner: &Planner,
+    options: ExecutionOptions,
+    emit: &mut RowSink<'_>,
+) -> Result<Completion> {
+    let headers = crate::bind::query(plan, planner)?;
+    let simple = match &plan.body {
+        SetBody::Select(select)
+            if plan.ctes.is_empty()
+                && plan.order_by.is_empty()
+                && !select.distinct
+                && select.group_by.is_empty()
+                && select.having.is_none()
+                && select.single_table().is_some() =>
+        {
+            let exprs = select
+                .projection
+                .iter()
+                .filter_map(|p| match p {
+                    Projection::Expr { expr, .. } => Some(&**expr),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            aggregate_calls(&exprs)?.is_empty().then_some(&**select)
+        }
+        _ => None,
+    };
+    let Some(select) = simple else {
+        let (set, mut completion) = run_with_options(plan, planner, options)?;
+        completion.rows = 0;
+        for row in &set.rows {
+            completion.rows += 1;
+            if emit(&set.headers, row)?.is_break() {
+                break;
+            }
+        }
+        return Ok(completion);
+    };
+    let ctx = Rc::new(Context {
+        planner: planner.clone(),
+        sink: RefCell::new(Vec::new()),
+        control: Control::new(options),
+    });
+    ctx.control.step()?;
+    if plan.limit == Some(0) {
+        return Ok(Completion::default());
+    }
+    let bound = bind(&select.from[0].relation, &ctx, &Scope::new(), None)?;
+    let prepared = prepare(select, &[(bound.alias.clone(), bound.columns)])?;
+    let mut evaluator = evaluator(&ctx, &Scope::new());
+    let mut skipped = 0;
+    let mut emitted = 0;
+    for row in bound.rows {
+        ctx.control.step()?;
+        let values = (|| -> Result<Option<Vec<Value>>> {
+            let row = row?;
+            let row = Aliased {
+                alias: &bound.alias,
+                row: &*row,
+            };
+            if !passes(&mut evaluator, select.filter.as_ref(), &row)? {
+                return Ok(None);
+            }
+            if skipped < plan.offset {
+                skipped += 1;
+                return Ok(None);
+            }
+            prepared
+                .exprs
+                .iter()
+                .map(|expr| evaluator.eval(expr, &row))
+                .collect::<Result<Vec<_>>>()
+                .map(Some)
+        })();
+        match values {
+            Ok(Some(values)) => {
+                if row_bytes(&values) > ctx.control.options.max_bytes {
+                    return Err(Error::ResourceLimit("row exceeds byte budget".into()));
+                }
+                emitted += 1;
+                if emit(&headers, &values)?.is_break()
+                    || plan.limit.is_some_and(|limit| emitted >= limit)
+                {
+                    break;
+                }
+            }
+            Ok(None) => {}
+            Err(error) if skippable(&error) => report(&ctx, error)?,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Completion {
+        rows: emitted,
+        diagnostics: ctx.sink.take(),
+    })
 }
 
 fn set_rows(set: &ResultSet) -> Vec<Box<dyn Row + 'static>> {
@@ -248,10 +407,11 @@ fn recursive_cte(
         )));
     };
     let mut result = rename_columns(body_rows(left, ctx, scope, outer)?, &cte.columns)?;
-    let mut seen: HashSet<String> = result.rows.iter().map(|r| format!("{r:?}")).collect();
+    let mut seen: HashSet<Vec<ValueKey>> = result.rows.iter().map(|r| row_key(r)).collect();
     let mut working = result.clone_rows();
     let mut scope = scope.clone();
     for _ in 0..100_000 {
+        ctx.control.step()?;
         if working.rows.is_empty() {
             return Ok(result);
         }
@@ -268,8 +428,11 @@ fn recursive_cte(
         let fresh: Vec<Vec<Value>> = step
             .rows
             .into_iter()
-            .filter(|row| *all || seen.insert(format!("{row:?}")))
+            .filter(|row| *all || seen.insert(row_key(row)))
             .collect();
+        for row in &fresh {
+            ctx.control.row(row)?;
+        }
         result.rows.extend(fresh.iter().cloned());
         working = ResultSet {
             headers: result.headers.clone(),
@@ -297,6 +460,7 @@ pub fn run_query(
     scope: &Scope,
     outer: Option<&dyn Row>,
 ) -> Result<ResultSet> {
+    ctx.control.step()?;
     let mut scope = scope.clone();
     for cte in &plan.ctes {
         let set = if plan.recursive && mentions(&cte.query.body, &cte.name) {
@@ -341,9 +505,13 @@ fn body_rows(
                     if row.len() != width {
                         return Err(Error::Plan("VALUES rows differ in width".to_owned()));
                     }
-                    row.iter()
+                    ctx.control.step()?;
+                    let values = row
+                        .iter()
                         .map(|expr| evaluator.eval(expr, outer.unwrap_or(&EmptyRow)))
-                        .collect()
+                        .collect::<Result<Vec<_>>>()?;
+                    ctx.control.row(&values)?;
+                    Ok(values)
                 })
                 .collect::<Result<Vec<Vec<Value>>>>()?;
             Ok(ResultSet { headers, rows })
@@ -363,7 +531,7 @@ fn body_rows(
                     right.headers.len()
                 )));
             }
-            let key = |row: &Vec<Value>| format!("{row:?}");
+            let key = |row: &Vec<Value>| row_key(row);
             let rows = match op {
                 SetOp::Union => {
                     let mut rows = left.rows;
@@ -376,7 +544,7 @@ fn body_rows(
                     }
                 }
                 SetOp::Intersect => {
-                    let mut counts: HashMap<String, usize> = HashMap::new();
+                    let mut counts: HashMap<Vec<ValueKey>, usize> = HashMap::new();
                     for row in &right.rows {
                         *counts.entry(key(row)).or_default() += 1;
                     }
@@ -400,7 +568,7 @@ fn body_rows(
                         .collect()
                 }
                 SetOp::Except => {
-                    let mut counts: HashMap<String, usize> = HashMap::new();
+                    let mut counts: HashMap<Vec<ValueKey>, usize> = HashMap::new();
                     for row in &right.rows {
                         *counts.entry(key(row)).or_default() += 1;
                     }
@@ -485,9 +653,17 @@ fn order_set(
 }
 
 pub fn standalone(planner: &Planner) -> (Evaluator, Rc<Context>) {
+    standalone_with_options(planner, ExecutionOptions::default())
+}
+
+pub(crate) fn standalone_with_options(
+    planner: &Planner,
+    options: ExecutionOptions,
+) -> (Evaluator, Rc<Context>) {
     let ctx = Rc::new(Context {
         planner: planner.clone(),
         sink: RefCell::new(Vec::new()),
+        control: Control::new(options),
     });
     let evaluator = evaluator(&ctx, &Scope::new());
     (evaluator, ctx)
@@ -578,11 +754,19 @@ pub fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr) -> bool) {
             }
         }
         Expr::Trim {
-            expr, trim_what, ..
+            expr,
+            trim_what,
+            trim_characters,
+            ..
         } => {
             visit(expr, f);
             if let Some(what) = trim_what {
                 visit(what, f);
+            }
+            if let Some(characters) = trim_characters {
+                for character in characters {
+                    visit(character, f);
+                }
             }
         }
         Expr::Interval(interval) => visit(&interval.value, f),
@@ -665,6 +849,7 @@ fn aggregate_calls(exprs: &[&Expr]) -> Result<Vec<AggregateCall>> {
 }
 
 fn parse_aggregate(function: &Function) -> Result<AggregateCall> {
+    crate::bind::function_shape(function)?;
     let name = function.name.to_string().to_ascii_lowercase();
     let FunctionArguments::List(list) = &function.args else {
         return Err(Error::Arity {
@@ -739,7 +924,7 @@ enum Acc {
 
 struct Accumulator {
     acc: Acc,
-    seen: Option<HashSet<String>>,
+    seen: Option<HashSet<ValueKey>>,
 }
 
 impl Accumulator {
@@ -764,7 +949,7 @@ impl Accumulator {
     fn push(&mut self, value: Option<Value>, separator: Option<Value>) -> Result<()> {
         if let Some(seen) = &mut self.seen
             && let Some(value) = &value
-            && !seen.insert(format!("{value:?}"))
+            && !seen.insert(value.key())
         {
             return Ok(());
         }
@@ -896,7 +1081,7 @@ fn bind<'a>(
                 .iter()
                 .map(|c| (*c).to_owned())
                 .collect(),
-            rows: base_rows(source)?,
+            rows: base_rows_cancellable(source, &ctx.control.options.cancellation)?,
         }),
         Relation::Cte { name, alias } => {
             let set = scope
@@ -1069,9 +1254,9 @@ fn finish(
         collected.sort_by(|a, b| compare_keys(&a.0, &b.0, order_by));
     }
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(collected.len());
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<Vec<ValueKey>> = HashSet::new();
     for (_, projected) in collected {
-        if distinct && !seen.insert(format!("{projected:?}")) {
+        if distinct && !seen.insert(row_key(&projected)) {
             continue;
         }
         rows.push(projected);
@@ -1085,7 +1270,11 @@ fn finish(
 }
 
 fn bare_names(names: &[String], alias: &str, columns: &[String]) -> HashSet<String> {
-    let mut out: HashSet<String> = columns.iter().cloned().collect();
+    let mut out: HashSet<String> = if names.iter().any(|n| n == "*" || n == &format!("{alias}.*")) {
+        columns.iter().cloned().collect()
+    } else {
+        HashSet::new()
+    };
     for name in names {
         match name.split_once('.') {
             Some((qualifier, column)) if qualifier == alias => {
@@ -1120,9 +1309,17 @@ fn materialize<'a>(bound: Bound<'a>, names: &[String], ctx: &Context) -> Result<
     let wanted = bare_names(names, &bound.alias, &bound.columns);
     let mut rows = Vec::new();
     for row in bound.rows {
+        ctx.control.step()?;
         match row.and_then(|row| snapshot(&*row, &wanted)) {
-            Ok(row) => rows.push(row),
-            Err(error) if skippable(&error) => report(ctx, error),
+            Ok(row) => {
+                let values = wanted
+                    .iter()
+                    .filter_map(|name| row.column(name).ok())
+                    .collect::<Vec<_>>();
+                ctx.control.row(&values)?;
+                rows.push(row);
+            }
+            Err(error) if skippable(&error) => report(ctx, error)?,
             Err(error) => return Err(error),
         }
     }
@@ -1136,13 +1333,51 @@ fn join<'a>(
     right: Vec<Rc<dyn Row + 'a>>,
     right_names: &HashSet<String>,
     evaluator: &mut Evaluator,
+    ctx: &Context,
 ) -> Result<Vec<JoinRow<'a>>> {
     let alias = spec.relation.alias();
     let mut out = Vec::new();
     let mut right_matched = vec![false; right.len()];
+    let indexed = spec.on.is_none() && !spec.using.is_empty() && spec.kind != JoinKind::Cross;
+    let mut index: HashMap<Vec<ValueKey>, Vec<usize>> = HashMap::new();
+    if indexed {
+        for (position, row) in right.iter().enumerate() {
+            ctx.control.step()?;
+            let values = spec
+                .using
+                .iter()
+                .map(|column| row.column(column))
+                .collect::<Result<Vec<_>>>()?;
+            if !values.iter().any(Value::is_null) {
+                ctx.control.row(&values)?;
+                index.entry(row_key(&values)).or_default().push(position);
+            }
+        }
+    }
     for l in &left {
         let mut matched = false;
-        for (index, r) in right.iter().enumerate() {
+        let matching = if indexed {
+            let values = spec
+                .using
+                .iter()
+                .map(|column| l.column(column))
+                .collect::<Result<Vec<_>>>()?;
+            if values.iter().any(Value::is_null) {
+                None
+            } else {
+                index.get(&row_key(&values))
+            }
+        } else {
+            None
+        };
+        let candidates: Box<dyn Iterator<Item = usize>> = if indexed {
+            Box::new(matching.into_iter().flatten().copied())
+        } else {
+            Box::new(0..right.len())
+        };
+        for index in candidates {
+            ctx.control.step()?;
+            let r = &right[index];
             let candidate = l.extend(alias, r.clone(), &spec.using);
             let ok = if spec.kind == JoinKind::Cross {
                 true
@@ -1161,12 +1396,14 @@ fn join<'a>(
                 all
             };
             if ok {
+                ctx.control.retain(std::mem::size_of::<JoinRow>())?;
                 out.push(candidate);
                 matched = true;
                 right_matched[index] = true;
             }
         }
         if !matched && matches!(spec.kind, JoinKind::Left | JoinKind::Full) {
+            ctx.control.retain(std::mem::size_of::<JoinRow>())?;
             out.push(l.extend(
                 alias,
                 Rc::new(NullRow {
@@ -1196,6 +1433,7 @@ fn join<'a>(
                 ));
             }
             row.parts.push((alias.to_owned(), r.clone()));
+            ctx.control.retain(std::mem::size_of::<JoinRow>())?;
             out.push(row);
         }
     }
@@ -1234,7 +1472,40 @@ fn select_rows(
             }
         }
     }
-    let names = referenced_columns(&all_exprs);
+    let mut names = Vec::new();
+    for expr in &all_exprs {
+        visit(expr, &mut |node| {
+            match node {
+                Expr::Identifier(i) => names.push(i.value.to_ascii_lowercase()),
+                Expr::CompoundIdentifier(parts) => names.push(
+                    parts
+                        .iter()
+                        .map(|i| i.value.to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join("."),
+                ),
+                Expr::Subquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } => {
+                    names.push("*".into())
+                }
+                _ => {}
+            }
+            true
+        });
+    }
+    for projection in &plan.projection {
+        if let Projection::Wildcard(qualifier) = projection {
+            names.push(
+                qualifier
+                    .as_ref()
+                    .map_or_else(|| "*".into(), |q| format!("{q}.*")),
+            );
+        }
+    }
+    for clause in &plan.from {
+        for join in &clause.joins {
+            names.extend(join.using.iter().cloned());
+        }
+    }
     let mut evaluator = evaluator(ctx, scope);
     let mut relations: Vec<(String, Vec<String>)> = Vec::new();
     let streaming = plan.from.len() == 1 && plan.from[0].joins.is_empty();
@@ -1275,7 +1546,15 @@ fn select_rows(
                 relations.push((bound.alias.clone(), bound.columns.clone()));
                 let right_alias = bound.alias.clone();
                 let (right, right_names) = materialize(bound, &names, ctx)?;
-                current = join(current, &aliases, spec, right, &right_names, &mut evaluator)?;
+                current = join(
+                    current,
+                    &aliases,
+                    spec,
+                    right,
+                    &right_names,
+                    &mut evaluator,
+                    ctx,
+                )?;
                 aliases.push((right_alias, right_names));
             }
             if first {
@@ -1292,6 +1571,7 @@ fn select_rows(
                         };
                         row.parts.extend(r.parts.iter().cloned());
                         row.merged.extend(r.merged.iter().cloned());
+                        ctx.control.retain(std::mem::size_of::<JoinRow>())?;
                         combined.push(row);
                     }
                 }
@@ -1353,10 +1633,11 @@ fn select_simple<'a>(
     let cap = limit.map(|limit| limit.saturating_add(offset));
     let mut collected: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
     for row in rows {
+        ctx.control.step()?;
         let row = match row {
             Ok(row) => row,
             Err(error) if skippable(&error) => {
-                report(ctx, error);
+                report(ctx, error)?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -1374,9 +1655,35 @@ fn select_simple<'a>(
             Ok(Some((keys, projected)))
         })();
         match step {
-            Ok(Some(item)) => collected.push(item),
+            Ok(Some(item)) => {
+                let bytes = row_bytes(&item.0).saturating_add(row_bytes(&item.1));
+                if !order_by.is_empty()
+                    && !plan.distinct
+                    && let Some(cap) = cap
+                {
+                    if cap == 0 {
+                        break;
+                    }
+                    let position = collected.partition_point(|existing| {
+                        compare_keys(&existing.0, &item.0, order_by) != Ordering::Greater
+                    });
+                    if position < cap {
+                        if collected.len() == cap {
+                            let old = collected.pop().expect("full top-k");
+                            let previous = row_bytes(&old.0).saturating_add(row_bytes(&old.1));
+                            ctx.control.allocate(bytes.saturating_sub(previous))?;
+                        } else {
+                            ctx.control.retain(bytes)?;
+                        }
+                        collected.insert(position, item);
+                    }
+                } else {
+                    ctx.control.retain(bytes)?;
+                    collected.push(item);
+                }
+            }
             Ok(None) => {}
-            Err(error) if skippable(&error) => report(ctx, error),
+            Err(error) if skippable(&error) => report(ctx, error)?,
             Err(error) => return Err(error),
         }
         if can_stop_early && cap.is_some_and(|cap| collected.len() >= cap) {
@@ -1422,12 +1729,13 @@ fn select_grouped<'a>(
     }
     let referenced = referenced_columns(&referenced_exprs);
     let mut groups: Vec<Group> = Vec::new();
-    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut index: HashMap<Vec<ValueKey>, usize> = HashMap::new();
     for row in rows {
+        ctx.control.step()?;
         let row = match row {
             Ok(row) => row,
             Err(error) if skippable(&error) => {
-                report(ctx, error);
+                report(ctx, error)?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -1441,7 +1749,7 @@ fn select_grouped<'a>(
                 .iter()
                 .map(|expr| evaluator.eval(expr, &row))
                 .collect::<Result<Vec<Value>>>()?;
-            let key = format!("{key_values:?}");
+            let key = row_key(&key_values);
             let position = match index.get(&key) {
                 Some(position) => *position,
                 None => {
@@ -1455,6 +1763,12 @@ fn select_grouped<'a>(
                             Err(error) => return Err(error),
                         }
                     }
+                    ctx.control.retain(
+                        snapshot
+                            .values()
+                            .map(|v| row_bytes(std::slice::from_ref(v)))
+                            .sum(),
+                    )?;
                     groups.push(Group {
                         snapshot,
                         accumulators: calls.iter().map(Accumulator::new).collect(),
@@ -1472,13 +1786,37 @@ fn select_grouped<'a>(
                     None => None,
                     Some(sep) => Some(evaluator.eval(sep, &row)?),
                 };
+                let bytes = value
+                    .as_ref()
+                    .map_or(0, |v| row_bytes(std::slice::from_ref(v)));
+                let previous_seen = accumulator.seen.as_ref().map_or(0, HashSet::len);
+                let retained = |acc: &Acc| match acc {
+                    Acc::Min(Some(value)) | Acc::Max(Some(value)) => {
+                        row_bytes(std::slice::from_ref(value))
+                    }
+                    _ => 0,
+                };
+                let previous = retained(&accumulator.acc);
+                let parts = match &accumulator.acc {
+                    Acc::Concat { parts, .. } => parts.len(),
+                    _ => 0,
+                };
                 accumulator.push(value, separator)?;
+                if accumulator.seen.as_ref().map_or(0, HashSet::len) > previous_seen {
+                    ctx.control.allocate(bytes)?;
+                }
+                if matches!(&accumulator.acc, Acc::Concat { parts: current, .. } if current.len() > parts)
+                {
+                    ctx.control.allocate(bytes)?;
+                }
+                ctx.control
+                    .allocate(retained(&accumulator.acc).saturating_sub(previous))?;
             }
             Ok(())
         })();
         match step {
             Ok(()) => {}
-            Err(error) if skippable(&error) => report(ctx, error),
+            Err(error) if skippable(&error) => report(ctx, error)?,
             Err(error) => return Err(error),
         }
     }
@@ -1505,6 +1843,8 @@ fn select_grouped<'a>(
             .map(|expr| evaluator.eval(expr, &row))
             .collect::<Result<Vec<Value>>>()?;
         let keys = order_values(evaluator, &order, &projected, &row)?;
+        ctx.control
+            .retain(row_bytes(&keys).saturating_add(row_bytes(&projected)))?;
         collected.push((keys, projected));
     }
     Ok(finish(
@@ -1863,5 +2203,80 @@ mod tests {
             Err(Error::Plan(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn materialization_reads_only_required_columns() {
+        struct Lazy;
+        impl Row for Lazy {
+            fn column(&self, name: &str) -> Result<Value> {
+                match name {
+                    "path" => Ok(Value::Text("file".into())),
+                    "size" => panic!("unused metadata was requested"),
+                    _ => Err(Error::UnknownColumn(name.into())),
+                }
+            }
+        }
+        let (_, ctx) = standalone(&Planner::new("/unused", WalkOptions::default()));
+        let bound = Bound {
+            alias: "f".into(),
+            columns: vec!["path".into(), "size".into()],
+            rows: Box::new(std::iter::once(Ok(Box::new(Lazy) as Box<dyn Row>))),
+        };
+        let (rows, _) = materialize(bound, &["f.path".into()], &ctx).expect("materialize");
+        assert_eq!(rows.len(), 1);
+    }
+    #[test]
+    fn aggregate_input_can_exceed_the_materialized_row_budget() {
+        struct SizedRow;
+        impl Row for SizedRow {
+            fn column(&self, name: &str) -> Result<Value> {
+                if name == "size" {
+                    Ok(Value::Int(1))
+                } else {
+                    Err(Error::UnknownColumn(name.into()))
+                }
+            }
+        }
+        let planner = Planner::new("/unused", WalkOptions::default());
+        let Plan::Select(query) = planner
+            .plan("select count(*), sum(size), min(size), max(size) from files")
+            .expect("plan")
+            .remove(0)
+        else {
+            panic!("select")
+        };
+        let SetBody::Select(plan) = query.body else {
+            panic!("select body")
+        };
+        let prepared = prepare(&plan, &[("files".into(), vec!["size".into()])]).expect("prepare");
+        let calls =
+            aggregate_calls(&prepared.exprs.iter().collect::<Vec<_>>()).expect("aggregates");
+        let count = 1_000_001;
+        let rows =
+            Box::new((0..count).map(|_| Ok(JoinRow::single("files", Box::new(SizedRow), None))));
+        let (mut evaluator, ctx) = standalone(&planner);
+        let set = select_grouped(
+            &plan,
+            prepared,
+            calls,
+            rows,
+            &Paging {
+                order_by: &[],
+                limit: None,
+                offset: 0,
+            },
+            &mut evaluator,
+            &ctx,
+        )
+        .expect("bounded aggregate");
+        assert_eq!(
+            set.rows,
+            vec![vec![
+                Value::Int(count),
+                Value::Int(count),
+                Value::Int(1),
+                Value::Int(1)
+            ]]
+        );
     }
 }

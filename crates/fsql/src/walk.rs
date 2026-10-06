@@ -56,6 +56,7 @@ fn open_dir(dirfd: impl rustix::fd::AsFd, name: &CStr, path: &Path) -> Result<Ow
 }
 
 pub fn open_chain(directory: &Path) -> Result<OwnedFd> {
+    validate_path(directory)?;
     let mut fd = open_dir(CWD, c"/", Path::new("/"))?;
     let mut opened = PathBuf::from("/");
     for component in directory.components() {
@@ -67,6 +68,22 @@ pub fn open_chain(directory: &Path) -> Result<OwnedFd> {
         fd = open_dir(&fd, &c_part, &opened)?;
     }
     Ok(fd)
+}
+
+/// Mutation paths are absolute and contain no parent traversal components.
+pub fn validate_path(path: &Path) -> Result<()> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err(Error::Plan(format!(
+            "{} must be absolute and must not contain `..`",
+            path.display()
+        )));
+    }
+    c_name(path.as_os_str(), path)?;
+    Ok(())
 }
 
 fn kind_of(kind: ObservedKind) -> Kind {
@@ -111,6 +128,7 @@ pub struct Walker {
     root: PathBuf,
     initial_depth: u32,
     directory: Option<(RelativePath, PathBuf)>,
+    cancellation: Option<crate::execution::ScanCancellation>,
 }
 
 impl Walker {
@@ -144,7 +162,21 @@ impl Walker {
             root,
             initial_depth: options.initial_depth,
             directory: None,
+            cancellation: None,
         })
+    }
+
+    pub(crate) fn cancellable(
+        root: &Path,
+        options: WalkOptions,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<Self> {
+        if cancellation.is_cancelled() {
+            return Err(Error::ResourceLimit("cancelled".into()));
+        }
+        let mut walker = Self::new(root, options)?;
+        walker.cancellation = Some(cancellation.register(walker.scan.cancellation()));
+        Ok(walker)
     }
 
     fn absolute(&mut self, entry: &ScanEntry) -> PathBuf {
@@ -181,19 +213,28 @@ impl Iterator for Walker {
             return Some(match self.scan.next()? {
                 Ok(ScanEvent::Entry(entry)) => self.entry(entry),
                 Ok(ScanEvent::Boundary { .. }) => continue,
-                Ok(ScanEvent::Unlisted { path, failure }) => Err(Error::Io {
-                    path: path.under(&self.root),
-                    source: match &failure {
-                        ScanFailure::Fs(error) => io_error(error),
-                        other => std::io::Error::other(other.to_string()),
-                    },
-                }),
+                Ok(ScanEvent::Unlisted { path, failure }) => {
+                    Err(unlisted_error(&path.under(&self.root), failure))
+                }
                 Err(error) => Err(Error::Walk {
                     root: self.root.clone(),
                     reason: error.to_string(),
                 }),
             });
         }
+    }
+}
+
+fn unlisted_error(path: &Path, failure: ScanFailure) -> Error {
+    match failure {
+        ScanFailure::Fs(error) if !matches!(error, FsError::Fatal(_)) => Error::Io {
+            path: path.to_path_buf(),
+            source: io_error(&error),
+        },
+        other => Error::Walk {
+            root: path.to_path_buf(),
+            reason: other.to_string(),
+        },
     }
 }
 
@@ -435,5 +476,39 @@ mod tests {
                 .any(|e| e.as_ref().is_ok_and(|e| e.name() == "locked"))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn cancellation_reaches_the_underlying_scan() {
+        let dir = fixture("cancel");
+        let cancellation = crate::CancellationToken::default();
+        let mut walker =
+            Walker::cancellable(&dir, WalkOptions::default(), &cancellation).expect("walker");
+        walker.next().expect("root").expect("entry");
+        cancellation.cancel();
+        assert!(matches!(walker.next(), Some(Err(Error::Walk { .. }))));
+        assert!(walker.next().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resource_limits_never_become_skippable_io_errors() {
+        use tree_fucker::update::{ResourceLimit, ResourceLimited};
+        let failure = ScanFailure::ResourceLimited(ResourceLimited {
+            limit: ResourceLimit::EntriesPerDirectory,
+            configured: 1,
+            observed: 2,
+            domain: None,
+        });
+        assert!(matches!(
+            unlisted_error(Path::new("/fixture"), failure),
+            Error::Walk { .. }
+        ));
+        assert!(matches!(
+            unlisted_error(
+                Path::new("/fixture"),
+                ScanFailure::Fs(FsError::PermissionDenied)
+            ),
+            Error::Io { .. }
+        ));
     }
 }

@@ -62,6 +62,26 @@ struct Cli {
     #[arg(long, default_value_t = 20, value_name = "N")]
     preview: usize,
 
+    /// Return partial SELECT results when filesystem entries cannot be read
+    #[arg(long)]
+    best_effort: bool,
+
+    /// Cumulative row allocation budget for query execution
+    #[arg(long, default_value_t = 1_000_000)]
+    max_rows: usize,
+
+    /// Estimated value allocation budget in bytes
+    #[arg(long, default_value_t = 268_435_456)]
+    max_bytes: usize,
+
+    /// Maximum input rows and candidate join pairs examined
+    #[arg(long, default_value_t = 10_000_000)]
+    max_work: usize,
+
+    /// Stop execution after this many seconds (between filesystem calls)
+    #[arg(long)]
+    timeout: Option<u64>,
+
     /// Print counts only
     #[arg(short, long)]
     quiet: bool,
@@ -112,7 +132,17 @@ fn run(cli: Cli) -> Result<ExitCode, Error> {
         Some(Command::Journal) => {
             for summary in journal::list(&base)? {
                 let first = summary.statement.lines().next().unwrap_or("").trim();
-                println!("{}  {:>6}  {}", summary.id, summary.records, first);
+                println!(
+                    "{}  {:>6}  {}{}",
+                    summary.id,
+                    summary.records,
+                    first,
+                    if summary.recovery_required {
+                        " [RECOVERY REQUIRED]"
+                    } else {
+                        ""
+                    }
+                );
             }
             return Ok(ExitCode::SUCCESS);
         }
@@ -152,13 +182,38 @@ fn run(cli: Cli) -> Result<ExitCode, Error> {
         for plan in planner.plan(&script)? {
             let code = match plan {
                 Plan::Select(select) => {
-                    let set = exec::run(&select, &planner, &mut report_error)?;
-                    output::write(&mut out, &set, format).map_err(|source| Error::Io {
+                    let io_error = |source| Error::Io {
                         path: PathBuf::from("<stdout>"),
                         source,
-                    })?;
-                    out.flush().ok();
-                    ExitCode::SUCCESS
+                    };
+                    let completion = if matches!(format, Format::Json | Format::Lines) {
+                        exec::stream(
+                            &select,
+                            &planner,
+                            execution_options(&cli),
+                            &mut |headers, row| {
+                                output::write_row(&mut out, headers, row, format)
+                                    .map_err(io_error)?;
+                                out.flush().map_err(io_error)?;
+                                Ok(std::ops::ControlFlow::Continue(()))
+                            },
+                        )?
+                    } else {
+                        let (set, completion) =
+                            exec::run_with_options(&select, &planner, execution_options(&cli))?;
+                        output::write(&mut out, &set, format).map_err(io_error)?;
+                        out.flush().map_err(io_error)?;
+                        completion
+                    };
+                    let code = if completion.is_complete() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(1)
+                    };
+                    for error in completion.diagnostics {
+                        report_error(error);
+                    }
+                    code
                 }
                 mutation => mutate_plan(&cli, &base, &planner, &mutation, &script, &mut out)?,
             };
@@ -169,6 +224,21 @@ fn run(cli: Cli) -> Result<ExitCode, Error> {
     }
     out.flush().ok();
     Ok(worst)
+}
+
+fn execution_options(cli: &Cli) -> fsql::ExecutionOptions {
+    fsql::ExecutionOptions {
+        error_policy: if cli.best_effort {
+            fsql::ErrorPolicy::BestEffort
+        } else {
+            fsql::ErrorPolicy::Strict
+        },
+        max_rows: cli.max_rows,
+        max_bytes: cli.max_bytes,
+        max_work: cli.max_work,
+        timeout: cli.timeout.map(std::time::Duration::from_secs),
+        ..fsql::ExecutionOptions::default()
+    }
 }
 
 fn read_stdin() -> Result<String, Error> {
@@ -187,6 +257,15 @@ fn report_error(error: Error) {
 }
 
 fn report_failures(outcome: &Outcome) {
+    for path in &outcome.partial {
+        eprintln!("fsql: {} was partially changed", path.display());
+    }
+    for path in &outcome.recovery_required {
+        eprintln!(
+            "fsql: {} requires recovery reconciliation; pending intents were retained",
+            path.display()
+        );
+    }
     for (path, error) in &outcome.failures {
         eprintln!("fsql: {}: {error}", path.display());
     }
@@ -208,7 +287,8 @@ fn mutate_plan(
     script: &str,
     out: &mut dyn Write,
 ) -> Result<ExitCode, Error> {
-    let resolved = mutate::resolve(plan, planner, &mut report_error)?;
+    let resolved =
+        mutate::resolve_with_options(plan, planner, execution_options(cli), &mut report_error)?;
     let verb = resolved.verb();
     let count = resolved.len();
     let bytes = resolved.bytes();

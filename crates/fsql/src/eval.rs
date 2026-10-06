@@ -461,6 +461,9 @@ impl Evaluator {
         };
         let bytes = text_bytes(&subject).ok_or_else(|| mismatch("GLOB", &subject, &pattern))?;
         if !self.globs.contains_key(pattern_text) {
+            if self.globs.len() >= 64 {
+                self.globs.clear();
+            }
             let glob = GlobBuilder::new(pattern_text)
                 .literal_separator(false)
                 .build()
@@ -486,6 +489,9 @@ impl Evaluator {
         };
         let bytes = text_bytes(&subject).ok_or_else(|| mismatch("REGEXP", &subject, &pattern))?;
         if !self.regexes.contains_key(pattern_text) {
+            if self.regexes.len() >= 64 {
+                self.regexes.clear();
+            }
             let regex = Regex::new(pattern_text).map_err(|e| Error::InvalidPattern {
                 pattern: pattern_text.clone(),
                 reason: e.to_string(),
@@ -531,6 +537,7 @@ impl Evaluator {
     }
 
     fn function(&mut self, function: &Function, row: &dyn Row) -> Result<Value> {
+        crate::bind::function_shape(function)?;
         let name = function.name.to_string().to_ascii_lowercase();
         if is_aggregate(&name) {
             return self

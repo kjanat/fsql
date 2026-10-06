@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 use std::ffi::{CString, OsStr};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -19,7 +19,7 @@ use crate::plan::{self, InsertColumn, InsertPlan, InsertRows, OrderKey, Plan, Pl
 use crate::row::{Entry, Frozen, Identity, Kind, STATX_MASK};
 use crate::time;
 use crate::value::Value;
-use crate::walk::{Walker, c_name, open_chain};
+use crate::walk::{Walker, c_name, open_chain, validate_path};
 use crate::xattr;
 
 #[derive(Debug, Clone)]
@@ -62,6 +62,7 @@ pub struct NewEntry {
     pub atime: Option<i64>,
     pub mtime: Option<i64>,
     pub source: Option<PathBuf>,
+    source_identity: Option<Identity>,
     pub content: Option<Vec<u8>>,
 }
 
@@ -117,6 +118,10 @@ impl Resolved {
 pub struct Outcome {
     pub applied: usize,
     pub failures: Vec<(PathBuf, Error)>,
+    /// Entries changed before a later step failed.
+    pub partial: Vec<PathBuf>,
+    /// Journals retaining unfinished durable intents.
+    pub recovery_required: Vec<PathBuf>,
 }
 
 fn io(path: &Path, errno: Errno) -> Error {
@@ -133,11 +138,27 @@ fn std_io(path: &Path, source: std::io::Error) -> Error {
     }
 }
 
-fn skippable(error: &Error) -> bool {
-    matches!(error, Error::Io { .. })
+fn skippable(_error: &Error) -> bool {
+    false // A mutation must never resolve from an incomplete scan.
 }
 
 pub fn resolve(plan: &Plan, planner: &Planner, errors: &mut dyn FnMut(Error)) -> Result<Resolved> {
+    resolve_with_options(
+        plan,
+        planner,
+        crate::execution::ExecutionOptions::default(),
+        errors,
+    )
+}
+
+pub fn resolve_with_options(
+    plan: &Plan,
+    planner: &Planner,
+    mut options: crate::execution::ExecutionOptions,
+    errors: &mut dyn FnMut(Error),
+) -> Result<Resolved> {
+    crate::bind::plan(plan, planner)?;
+    options.error_policy = crate::execution::ErrorPolicy::Strict;
     match plan {
         Plan::Select(_) => Err(Error::Plan("SELECT is not a mutation".to_owned())),
         Plan::Delete(delete) => Ok(Resolved::Delete(collect(
@@ -150,6 +171,7 @@ pub fn resolve(plan: &Plan, planner: &Planner, errors: &mut dyn FnMut(Error)) ->
                 limit: delete.limit,
             },
             planner,
+            options,
             errors,
         )?)),
         Plan::Update(update) => Ok(Resolved::Update(collect(
@@ -162,9 +184,12 @@ pub fn resolve(plan: &Plan, planner: &Planner, errors: &mut dyn FnMut(Error)) ->
                 limit: update.limit,
             },
             planner,
+            options,
             errors,
         )?)),
-        Plan::Insert(insert) => Ok(Resolved::Insert(new_entries(insert, planner, errors)?)),
+        Plan::Insert(insert) => Ok(Resolved::Insert(new_entries(
+            insert, planner, options, errors,
+        )?)),
     }
 }
 
@@ -180,12 +205,18 @@ struct Selection<'a> {
 fn collect(
     selection: &Selection<'_>,
     planner: &Planner,
+    options: crate::execution::ExecutionOptions,
     errors: &mut dyn FnMut(Error),
 ) -> Result<Vec<Target>> {
-    let (mut evaluator, ctx) = exec::standalone(planner);
-    let walker = Walker::new(&selection.source.root, selection.source.options.clone())?;
+    let (mut evaluator, ctx) = exec::standalone_with_options(planner, options);
+    let walker = Walker::cancellable(
+        &selection.source.root,
+        selection.source.options.clone(),
+        &ctx.control.options.cancellation,
+    )?;
     let mut collected: Vec<(Vec<Value>, Target)> = Vec::new();
     for entry in walker {
+        ctx.control.step()?;
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) if skippable(&error) => {
@@ -224,7 +255,14 @@ fn collect(
             )))
         })();
         match step {
-            Ok(Some(item)) => collected.push(item),
+            Ok(Some(item)) => {
+                ctx.control.retain(
+                    std::mem::size_of::<Target>()
+                        .saturating_add(item.1.frozen.path.as_os_str().len())
+                        .saturating_add(crate::execution::row_bytes(&item.0)),
+                )?;
+                collected.push(item);
+            }
             Ok(None) => {}
             Err(error) if skippable(&error) => errors(error),
             Err(error) => return Err(error),
@@ -345,6 +383,7 @@ fn change(evaluator: &mut Evaluator, set: &Set, row: &dyn Row, frozen: &Frozen) 
                     path.display()
                 )));
             }
+            validate_path(&path)?;
             Change::Rename(path)
         }
         Column::Name => {
@@ -365,6 +404,7 @@ fn change(evaluator: &mut Evaluator, set: &Set, row: &dyn Row, frozen: &Frozen) 
                     parent.display()
                 )));
             }
+            validate_path(&parent)?;
             Change::Rename(parent.join(&frozen.name))
         }
         Column::Target => {
@@ -388,8 +428,10 @@ fn change(evaluator: &mut Evaluator, set: &Set, row: &dyn Row, frozen: &Frozen) 
 fn new_entries(
     plan: &InsertPlan,
     planner: &Planner,
-    errors: &mut dyn FnMut(Error),
+    options: crate::execution::ExecutionOptions,
+    _errors: &mut dyn FnMut(Error),
 ) -> Result<Vec<NewEntry>> {
+    let control = crate::execution::Control::new(options.clone());
     let rows: Vec<Vec<Value>> = match &plan.rows {
         InsertRows::Values(rows) => rows
             .iter()
@@ -400,7 +442,7 @@ fn new_entries(
             })
             .collect::<Result<Vec<_>>>()?,
         InsertRows::Query(query) => {
-            let set = exec::run(query, planner, errors)?;
+            let (set, _) = exec::run_with_options(query, planner, options)?;
             if set.headers.len() != plan.columns.len() {
                 return Err(Error::Plan(format!(
                     "INSERT names {} columns but SELECT yields {}",
@@ -411,7 +453,12 @@ fn new_entries(
             set.rows
         }
     };
-    rows.iter().map(|row| new_entry(plan, row)).collect()
+    rows.iter()
+        .map(|row| {
+            control.row(row)?;
+            new_entry(plan, row)
+        })
+        .collect()
 }
 
 fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
@@ -425,6 +472,7 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
         atime: None,
         mtime: None,
         source: None,
+        source_identity: None,
         content: None,
     };
     let mut kind_given = false;
@@ -478,7 +526,9 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
             entry.path.display()
         )));
     }
+    validate_path(&entry.path)?;
     if let Some(source) = &entry.source {
+        validate_path(source)?;
         if !source.is_absolute() {
             return Err(Error::Plan(format!(
                 "INSERT source `{}` must be absolute",
@@ -487,6 +537,7 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
         }
         let stat = rustix::fs::statx(CWD, source, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
             .map_err(|e| io(source, e))?;
+        entry.source_identity = Some(Identity::of(&stat));
         let source_kind = Kind::from_mode(u32::from(stat.stx_mode));
         if !kind_given {
             entry.kind = source_kind;
@@ -613,7 +664,8 @@ fn copy_file(
     sink_path: &Path,
 ) -> Result<()> {
     std::io::copy(&mut source, &mut sink).map_err(|e| std_io(sink_path, e))?;
-    copy_attributes(&source, source_path, &sink)
+    copy_attributes(&source, source_path, &sink)?;
+    sink.sync_all().map_err(|e| std_io(sink_path, e))
 }
 
 fn copy_out(dirfd: &OwnedFd, name: &CString, path: &Path, tomb: &Path) -> Result<()> {
@@ -641,6 +693,15 @@ fn copy_in(tomb: &Path, dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<
 
 fn apply_delete(targets: &[Target], mut journal: Option<&mut Journal>) -> Result<Outcome> {
     verify_all(targets)?;
+    if journal.is_some()
+        && targets
+            .iter()
+            .any(|t| !matches!(t.frozen.kind, Kind::File | Kind::Dir | Kind::Symlink))
+    {
+        return Err(Error::Unsupported(
+            "journaled deletion of special files".into(),
+        ));
+    }
     let mut order: Vec<&Target> = targets.iter().collect();
     order.sort_by_key(|t| Reverse(t.frozen.path.components().count()));
     let mut outcome = Outcome::default();
@@ -653,7 +714,19 @@ fn apply_delete(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
             };
             let seq = journal.next_seq();
             let tomb = journal.tomb_path(seq);
-            let tomb_bytes = match frozen.kind {
+            let record = Record::Delete {
+                seq,
+                path: frozen.path.as_os_str().as_bytes().to_vec(),
+                kind: frozen.kind.as_str().to_owned(),
+                mode: target.before.mode,
+                target: target.before.target.clone(),
+                tomb: (frozen.kind == Kind::File).then(|| tomb.as_os_str().as_bytes().to_vec()),
+                dev: frozen.identity.dev,
+                ino: frozen.identity.ino,
+                ctime: frozen.identity.ctime,
+            };
+            journal.begin(&record)?;
+            let _tomb_bytes = match frozen.kind {
                 Kind::Dir => {
                     unlink(&dirfd, &name, Kind::Dir, &frozen.path)?;
                     None
@@ -672,21 +745,24 @@ fn apply_delete(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                     None
                 }
             };
-            journal.record(Record::Delete {
-                seq,
-                path: frozen.path.as_os_str().as_bytes().to_vec(),
-                kind: frozen.kind.as_str().to_owned(),
-                mode: target.before.mode,
-                target: target.before.target.clone(),
-                tomb: tomb_bytes,
-                dev: frozen.identity.dev,
-                ino: frozen.identity.ino,
-                ctime: frozen.identity.ctime,
-            })
+            journal::sync_dir(&frozen.parent)?;
+            journal::sync_dir(tomb.parent().expect("tomb parent"))?;
+            journal.record(record)
         })();
         match step {
             Ok(()) => outcome.applied += 1,
-            Err(error) => outcome.failures.push((frozen.path.clone(), error)),
+            Err(error) => {
+                outcome.failures.push((frozen.path.clone(), error));
+                if let Some(journal) = journal.as_deref_mut() {
+                    let seq = journal.next_seq().saturating_sub(1);
+                    if check(frozen).is_ok() && !journal.tomb_path(seq).exists() {
+                        journal.cancel(seq)?;
+                    } else {
+                        outcome.recovery_required.push(journal.dir().to_path_buf());
+                        break;
+                    }
+                }
+            }
         }
     }
     Ok(outcome)
@@ -717,19 +793,50 @@ fn set_times(
         last_access: atime.map(timespec).unwrap_or_else(omit),
         last_modification: mtime.map(timespec).unwrap_or_else(omit),
     };
-    rustix::fs::utimensat(dirfd, name, &times, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| io(path, e))
+    let fd = pin(dirfd, name, path)?;
+    rustix::fs::utimensat(
+        &fd,
+        c"",
+        &times,
+        AtFlags::SYMLINK_NOFOLLOW | AtFlags::EMPTY_PATH,
+    )
+    .map_err(|e| io(path, e))
 }
 
-fn set_mode(dirfd: &OwnedFd, name: &CString, path: &Path, kind: Kind, mode: u32) -> Result<()> {
-    if kind == Kind::Symlink {
+fn pin(dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<OwnedFd> {
+    if name.as_bytes().is_empty() {
+        return rustix::io::dup(dirfd).map_err(|e| io(path, e));
+    }
+    rustix::fs::openat(
+        dirfd,
+        name,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| io(path, e))
+}
+
+fn set_mode(dirfd: &OwnedFd, name: &CString, path: &Path, _kind: Kind, mode: u32) -> Result<()> {
+    let fd = pin(dirfd, name, path)?;
+    let stat = rustix::fs::statx(
+        &fd,
+        c"",
+        AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
+        STATX_MASK,
+    )
+    .map_err(|e| io(path, e))?;
+    if Kind::from_mode(u32::from(stat.stx_mode)) == Kind::Symlink {
         return Err(Error::Plan(format!(
             "{} is a symlink, its mode cannot change",
             path.display()
         )));
     }
+    // rustix's chmodat does not implement fchmodat2. This Linux procfs magic
+    // link addresses our held O_PATH descriptor, never the mutable entry name.
+    let descriptor = format!("/proc/self/fd/{}", fd.as_raw_fd());
     rustix::fs::chmodat(
-        dirfd,
-        name,
+        CWD,
+        descriptor.as_str(),
         Mode::from_raw_mode(mode & 0o7777),
         AtFlags::empty(),
     )
@@ -743,19 +850,36 @@ fn set_owner(
     uid: Option<u32>,
     gid: Option<u32>,
 ) -> Result<()> {
+    let fd = pin(dirfd, name, path)?;
     rustix::fs::chownat(
-        dirfd,
-        name,
+        &fd,
+        c"",
         uid.map(Uid::from_raw),
         gid.map(Gid::from_raw),
-        AtFlags::SYMLINK_NOFOLLOW,
+        AtFlags::SYMLINK_NOFOLLOW | AtFlags::EMPTY_PATH,
     )
     .map_err(|e| io(path, e))
 }
 
-fn set_target(dirfd: &OwnedFd, name: &CString, path: &Path, target: &[u8]) -> Result<()> {
-    rustix::fs::unlinkat(dirfd, name, AtFlags::empty()).map_err(|e| io(path, e))?;
-    rustix::fs::symlinkat(OsStr::from_bytes(target), dirfd, name).map_err(|e| io(path, e))
+fn set_target(dirfd: &OwnedFd, name: &CString, path: &Path, target: &[u8]) -> Result<OwnedFd> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let temporary = CString::new(format!(
+        ".fsql-link-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ))
+    .expect("temporary name");
+    rustix::fs::symlinkat(OsStr::from_bytes(target), dirfd, &temporary).map_err(|e| io(path, e))?;
+    let result = (|| {
+        let fd = pin(dirfd, &temporary, path)?;
+        rustix::fs::renameat(dirfd, &temporary, dirfd, name).map_err(|e| io(path, e))?;
+        Ok(fd)
+    })();
+    if result.is_err() {
+        let _ = rustix::fs::unlinkat(dirfd, &temporary, AtFlags::empty());
+    }
+    result
 }
 
 fn rename(
@@ -791,30 +915,72 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
             path: Some(frozen.path.as_os_str().as_bytes().to_vec()),
             target: target.before.target.clone(),
         };
+        let seq = journal.as_ref().map(|j| j.next_seq()).unwrap_or(0);
+        let mut intended = Attrs::default();
+        for change in &target.changes {
+            match change {
+                Change::Mode(v) => intended.mode = Some(*v),
+                Change::Uid(v) => intended.uid = Some(*v),
+                Change::Gid(v) => intended.gid = Some(*v),
+                Change::Atime(v) => intended.atime = Some(*v),
+                Change::Mtime(v) => intended.mtime = Some(*v),
+                Change::Rename(v) => intended.path = Some(v.as_os_str().as_bytes().to_vec()),
+                Change::Target(v) => intended.target = Some(v.clone()),
+            }
+        }
         let mut after = Attrs::default();
+        let mut identity = None;
+        let mut begun = false;
+        let mut synchronized = true;
         let step = (|| -> Result<()> {
             let (mut dirfd, mut name) = check(frozen)?;
             let mut path = frozen.path.clone();
+            if let Some(journal) = journal.as_deref_mut() {
+                journal.begin(&Record::Update {
+                    seq,
+                    path: frozen.path.as_os_str().as_bytes().to_vec(),
+                    kind: frozen.kind.as_str().into(),
+                    before: before.clone(),
+                    after: intended,
+                    identity: Some(frozen.identity),
+                })?;
+                begun = true;
+            }
+            let mut expected = frozen.identity;
             for change in &target.changes {
+                let pinned = pin(&dirfd, &name, &path)?;
+                let empty = c"".to_owned();
+                let stat = rustix::fs::statx(
+                    &pinned,
+                    c"",
+                    AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
+                    STATX_MASK,
+                )
+                .map_err(|e| io(&path, e))?;
+                if !Identity::of(&stat).matches(&expected, frozen.kind) {
+                    return Err(Error::Stale(path.clone()));
+                }
+                synchronized = false;
+                let mut replacement = None;
                 match change {
                     Change::Mode(mode) => {
-                        set_mode(&dirfd, &name, &path, frozen.kind, *mode)?;
+                        set_mode(&pinned, &empty, &path, frozen.kind, *mode)?;
                         after.mode = Some(*mode);
                     }
                     Change::Uid(uid) => {
-                        set_owner(&dirfd, &name, &path, Some(*uid), None)?;
+                        set_owner(&pinned, &empty, &path, Some(*uid), None)?;
                         after.uid = Some(*uid);
                     }
                     Change::Gid(gid) => {
-                        set_owner(&dirfd, &name, &path, None, Some(*gid))?;
+                        set_owner(&pinned, &empty, &path, None, Some(*gid))?;
                         after.gid = Some(*gid);
                     }
                     Change::Atime(t) => {
-                        set_times(&dirfd, &name, &path, Some(*t), None)?;
+                        set_times(&pinned, &empty, &path, Some(*t), None)?;
                         after.atime = Some(*t);
                     }
                     Change::Mtime(t) => {
-                        set_times(&dirfd, &name, &path, None, Some(*t))?;
+                        set_times(&pinned, &empty, &path, None, Some(*t))?;
                         after.mtime = Some(*t);
                     }
                     Change::Rename(destination) => {
@@ -825,114 +991,214 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                         after.path = Some(destination.as_os_str().as_bytes().to_vec());
                     }
                     Change::Target(target) => {
-                        set_target(&dirfd, &name, &path, target)?;
+                        replacement = Some(set_target(&dirfd, &name, &path, target)?);
                         after.target = Some(target.clone());
                     }
                 }
+                let stat = rustix::fs::statx(
+                    replacement.as_ref().unwrap_or(&pinned),
+                    c"",
+                    AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
+                    STATX_MASK,
+                )
+                .map_err(|e| io(&path, e))?;
+                expected = Identity::of(&stat);
+                let named = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
+                    .map_err(|e| io(&path, e))?;
+                if Identity::of(&named) != expected {
+                    return Err(Error::Stale(path.clone()));
+                }
+                identity = Some(expected);
+                if journal.is_some() {
+                    rustix::fs::syncfs(&dirfd).map_err(|e| io(&path, e))?;
+                }
+                synchronized = true;
             }
             Ok(())
         })();
         let touched = after != Attrs::default();
         if touched && let Some(journal) = journal.as_deref_mut() {
+            if !synchronized {
+                outcome.partial.push(frozen.path.clone());
+                outcome.failures.push((
+                    frozen.path.clone(),
+                    step.err()
+                        .unwrap_or_else(|| Error::RecoveryRequired(journal.dir().to_path_buf())),
+                ));
+                outcome.recovery_required.push(journal.dir().to_path_buf());
+                break;
+            }
             let record = Record::Update {
-                seq: journal.next_seq(),
+                seq,
                 path: frozen.path.as_os_str().as_bytes().to_vec(),
                 kind: frozen.kind.as_str().to_owned(),
                 before: before.clone(),
                 after: after.clone(),
+                identity,
             };
             if let Err(error) = journal.record(record) {
                 outcome.failures.push((frozen.path.clone(), error));
+                outcome.recovery_required.push(journal.dir().to_path_buf());
+                break;
             }
+        } else if begun && let Some(journal) = journal.as_deref_mut() {
+            journal.cancel(seq)?;
         }
         match step {
             Ok(()) => outcome.applied += 1,
-            Err(error) => outcome.failures.push((frozen.path.clone(), error)),
+            Err(error) => {
+                if touched {
+                    outcome.partial.push(frozen.path.clone());
+                }
+                outcome.failures.push((frozen.path.clone(), error));
+            }
         }
     }
     Ok(outcome)
 }
 
-fn create(entry: &NewEntry, dirfd: &OwnedFd, name: &CString) -> Result<()> {
-    match entry.kind {
-        Kind::Dir => {
-            rustix::fs::mkdirat(
-                dirfd,
-                name,
-                Mode::from_raw_mode(entry.mode.unwrap_or(0o755)),
-            )
-            .map_err(|e| io(&entry.path, e))?;
-        }
-        Kind::File => {
-            let fd = rustix::fs::openat(
-                dirfd,
-                name,
-                OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::from_raw_mode(entry.mode.unwrap_or(0o644)),
-            )
-            .map_err(|e| io(&entry.path, e))?;
-            let mut file = std::fs::File::from(fd);
-            if let Some(content) = &entry.content {
-                std::io::Write::write_all(&mut file, content)
-                    .map_err(|e| std_io(&entry.path, e))?;
-            } else if let Some(source) = &entry.source {
-                let mut from = std::fs::File::open(source).map_err(|e| std_io(source, e))?;
-                std::io::copy(&mut from, &mut file).map_err(|e| std_io(&entry.path, e))?;
-            }
-        }
-        Kind::Symlink => {
-            let target = entry.target.as_deref().unwrap_or(b"");
-            rustix::fs::symlinkat(OsStr::from_bytes(target), dirfd, name)
-                .map_err(|e| io(&entry.path, e))?;
-        }
-        other => return Err(Error::Plan(format!("cannot create a {}", other.as_str()))),
-    }
-    Ok(())
-}
-
 fn apply_insert(entries: &[NewEntry], mut journal: Option<&mut Journal>) -> Result<Outcome> {
     let mut outcome = Outcome::default();
     for entry in entries {
+        let seq = journal.as_ref().map(|j| j.next_seq()).unwrap_or(0);
+        let mut created = false;
+        let mut begun = false;
+        let mut recorded_identity = None;
+        let mut synchronized = false;
         let step = (|| -> Result<()> {
-            let (Some(parent), Some(file_name)) = (entry.path.parent(), entry.path.file_name())
-            else {
-                return Err(Error::Plan(format!(
-                    "`{}` is not a creatable path",
-                    entry.path.display()
-                )));
+            validate_path(&entry.path)?;
+            let (dirfd, name) = split(&entry.path)?;
+            // Open and verify the source before creating anything. The descriptor
+            // remains pinned throughout the copy, even if its name is replaced.
+            let mut source = if entry.kind == Kind::File && entry.content.is_none() {
+                match &entry.source {
+                    Some(path) => {
+                        let (parent, name) = split(path)?;
+                        let file = open_read(&parent, &name, path)?;
+                        let stat = rustix::fs::statx(&file, c"", AtFlags::EMPTY_PATH, STATX_MASK)
+                            .map_err(|e| io(path, e))?;
+                        if Some(Identity::of(&stat)) != entry.source_identity {
+                            return Err(Error::Stale(path.clone()));
+                        }
+                        Some(file)
+                    }
+                    None => None,
+                }
+            } else {
+                None
             };
-            let dirfd = open_chain(parent)?;
-            let name = c_name(file_name, &entry.path)?;
-            create(entry, &dirfd, &name)?;
-            if let Some(mode) = entry.mode
-                && entry.kind != Kind::Symlink
-            {
-                set_mode(&dirfd, &name, &entry.path, entry.kind, mode)?;
-            }
-            if entry.uid.is_some() || entry.gid.is_some() {
-                set_owner(&dirfd, &name, &entry.path, entry.uid, entry.gid)?;
-            }
-            if entry.atime.is_some() || entry.mtime.is_some() {
-                set_times(&dirfd, &name, &entry.path, entry.atime, entry.mtime)?;
-            }
             if let Some(journal) = journal.as_deref_mut() {
-                let stat = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
-                    .map_err(|e| io(&entry.path, e))?;
-                let identity = Identity::of(&stat);
-                journal.record(Record::Insert {
-                    seq: journal.next_seq(),
+                journal.begin(&Record::Insert {
+                    seq,
                     path: entry.path.as_os_str().as_bytes().to_vec(),
-                    kind: entry.kind.as_str().to_owned(),
-                    dev: identity.dev,
-                    ino: identity.ino,
-                    ctime: identity.ctime,
+                    kind: entry.kind.as_str().into(),
+                    dev: 0,
+                    ino: 0,
+                    ctime: 0,
                 })?;
+                begun = true;
             }
-            Ok(())
+            let file = match entry.kind {
+                Kind::Dir => {
+                    rustix::fs::mkdirat(
+                        &dirfd,
+                        &name,
+                        Mode::from_raw_mode(entry.mode.unwrap_or(0o755)),
+                    )
+                    .map_err(|e| io(&entry.path, e))?;
+                    None
+                }
+                Kind::File => {
+                    let fd = rustix::fs::openat(
+                        &dirfd,
+                        &name,
+                        OFlags::CREATE
+                            | OFlags::EXCL
+                            | OFlags::WRONLY
+                            | OFlags::CLOEXEC
+                            | OFlags::NOFOLLOW,
+                        Mode::from_raw_mode(entry.mode.unwrap_or(0o644)),
+                    )
+                    .map_err(|e| io(&entry.path, e))?;
+                    Some(std::fs::File::from(fd))
+                }
+                Kind::Symlink => {
+                    rustix::fs::symlinkat(
+                        OsStr::from_bytes(entry.target.as_deref().unwrap_or(b"")),
+                        &dirfd,
+                        &name,
+                    )
+                    .map_err(|e| io(&entry.path, e))?;
+                    None
+                }
+                _ => return Err(Error::Unsupported("creating special files".into())),
+            };
+            created = true;
+            let work = (|| -> Result<()> {
+                if let Some(mut file) = file {
+                    if let Some(content) = &entry.content {
+                        std::io::Write::write_all(&mut file, content)
+                            .map_err(|e| std_io(&entry.path, e))?;
+                    } else if let Some(from) = source.as_mut() {
+                        std::io::copy(from, &mut file).map_err(|e| std_io(&entry.path, e))?;
+                    }
+                    file.sync_all().map_err(|e| std_io(&entry.path, e))?;
+                }
+                if let Some(mode) = entry.mode
+                    && entry.kind != Kind::Symlink
+                {
+                    set_mode(&dirfd, &name, &entry.path, entry.kind, mode)?;
+                }
+                if entry.uid.is_some() || entry.gid.is_some() {
+                    set_owner(&dirfd, &name, &entry.path, entry.uid, entry.gid)?;
+                }
+                if entry.atime.is_some() || entry.mtime.is_some() {
+                    set_times(&dirfd, &name, &entry.path, entry.atime, entry.mtime)?;
+                }
+                Ok(())
+            })();
+            let stat = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
+                .map_err(|e| io(&entry.path, e))?;
+            recorded_identity = Some(Identity::of(&stat));
+            if journal.is_some() {
+                rustix::fs::syncfs(&dirfd).map_err(|e| io(&entry.path, e))?;
+            }
+            synchronized = true;
+            work
         })();
+        if let Some(journal) = journal.as_deref_mut()
+            && begun
+        {
+            if created {
+                let logged = match recorded_identity {
+                    Some(identity) if synchronized => journal.record(Record::Insert {
+                        seq,
+                        path: entry.path.as_os_str().as_bytes().to_vec(),
+                        kind: entry.kind.as_str().into(),
+                        dev: identity.dev,
+                        ino: identity.ino,
+                        ctime: identity.ctime,
+                    }),
+                    _ => Err(Error::RecoveryRequired(journal.dir().to_path_buf())),
+                };
+                if let Err(error) = logged {
+                    outcome.partial.push(entry.path.clone());
+                    outcome.failures.push((entry.path.clone(), error));
+                    outcome.recovery_required.push(journal.dir().to_path_buf());
+                    break;
+                }
+            } else {
+                journal.cancel(seq)?;
+            }
+        }
         match step {
             Ok(()) => outcome.applied += 1,
-            Err(error) => outcome.failures.push((entry.path.clone(), error)),
+            Err(error) => {
+                if created {
+                    outcome.partial.push(entry.path.clone());
+                }
+                outcome.failures.push((entry.path.clone(), error));
+            }
         }
     }
     Ok(outcome)
@@ -1006,13 +1272,34 @@ fn restore_delete(
     }
 }
 
-fn restore_update(original: &Path, kind: Kind, before: &Attrs, after: &Attrs) -> Result<()> {
+fn restore_update(
+    original: &Path,
+    kind: Kind,
+    before: &Attrs,
+    after: &Attrs,
+    identity: Option<Identity>,
+) -> Result<()> {
     let current = after
         .path
         .as_deref()
         .map(|p| PathBuf::from(OsStr::from_bytes(p)))
         .unwrap_or_else(|| original.to_path_buf());
     let (mut dirfd, mut name) = split(&current)?;
+    let expected = identity.ok_or_else(|| {
+        Error::Plan("legacy update journal lacks identity; automatic undo refused".into())
+    })?;
+    let mut pinned = pin(&dirfd, &name, &current)?;
+    let empty = c"".to_owned();
+    let stat = rustix::fs::statx(
+        &pinned,
+        c"",
+        AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
+        STATX_MASK,
+    )
+    .map_err(|e| io(&current, e))?;
+    if !Identity::of(&stat).matches(&expected, kind) {
+        return Err(Error::Stale(current));
+    }
     if after.path.is_some() {
         let (new_dirfd, new_name) = rename(&dirfd, &name, &current, original)?;
         dirfd = new_dirfd;
@@ -1021,17 +1308,17 @@ fn restore_update(original: &Path, kind: Kind, before: &Attrs, after: &Attrs) ->
     if after.target.is_some()
         && let Some(target) = &before.target
     {
-        set_target(&dirfd, &name, original, target)?;
+        pinned = set_target(&dirfd, &name, original, target)?;
     }
     if after.mode.is_some()
         && let Some(mode) = before.mode
     {
-        set_mode(&dirfd, &name, original, kind, mode)?;
+        set_mode(&pinned, &empty, original, kind, mode)?;
     }
     if after.uid.is_some() || after.gid.is_some() {
         set_owner(
-            &dirfd,
-            &name,
+            &pinned,
+            &empty,
             original,
             after.uid.and(before.uid),
             after.gid.and(before.gid),
@@ -1039,14 +1326,14 @@ fn restore_update(original: &Path, kind: Kind, before: &Attrs, after: &Attrs) ->
     }
     if after.atime.is_some() || after.mtime.is_some() {
         set_times(
-            &dirfd,
-            &name,
+            &pinned,
+            &empty,
             original,
             after.atime.and(before.atime),
             after.mtime.and(before.mtime),
         )?;
     }
-    Ok(())
+    rustix::fs::syncfs(&dirfd).map_err(|e| io(original, e))
 }
 
 fn restore_insert(path: &Path, kind: Kind, recorded: Identity) -> Result<()> {
@@ -1069,6 +1356,7 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
     let records = journal::load(base, id)?;
     let mut outcome = Outcome::default();
     for record in records.iter().rev() {
+        journal::begin_undo(base, id, record.seq())?;
         let (path, step) = match record {
             Record::Delete {
                 path,
@@ -1094,10 +1382,11 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
                 kind,
                 before,
                 after,
+                identity,
                 ..
             } => {
                 let original = PathBuf::from(OsStr::from_bytes(path));
-                let result = restore_update(&original, kind_of(kind), before, after);
+                let result = restore_update(&original, kind_of(kind), before, after, *identity);
                 (original, result)
             }
             Record::Insert {
@@ -1119,8 +1408,19 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
             }
         };
         match step {
-            Ok(()) => outcome.applied += 1,
-            Err(error) => outcome.failures.push((path, error)),
+            Ok(()) => {
+                if let Some(parent) = path.parent() {
+                    let fd = open_chain(parent)?;
+                    rustix::fs::syncfs(&fd).map_err(|e| io(&path, e))?;
+                }
+                journal::finish_undo(base, id, record.seq())?;
+                outcome.applied += 1;
+            }
+            Err(error) => {
+                outcome.failures.push((path, error));
+                outcome.recovery_required.push(base.join(id));
+                break;
+            }
         }
     }
     if outcome.failures.is_empty() {

@@ -93,6 +93,12 @@ Functions: `now`, `lower`, `upper`, `length`, `trim`, `substr`, `replace`,
 
 Comparing values of different types is an error rather than a silent
 mismatch, so `size > 'big'` fails instead of matching nothing.
+Numeric equality is shared by comparisons, grouping, distinctness and set
+operations: `1` and `1.0` represent the same key. Integer/float comparisons
+preserve large integer precision.
+
+Names, function arities and grouping are validated before scanning. Unsupported
+function modifiers, including window functions, are rejected explicitly.
 
 ## Joins, subqueries, CTEs, set operations
 
@@ -136,15 +142,25 @@ kind and mode when not given).
 A mutation runs in two phases. Resolve walks the tree, evaluates the
 predicate, and freezes every matching row with its device, inode and ctime.
 Apply reopens each parent directory component by component without following
-symlinks, checks the frozen identity, and only then issues the syscall. If any
-frozen row no longer matches, the whole statement stops before touching
-anything.
+symlinks and checks the frozen identity. Preflight detects stale targets before
+the first change; each target is checked again during apply. Metadata updates
+use a pinned object descriptor. Mutation paths must be absolute and cannot
+contain `..`.
 
-A statement is refused at plan time when:
+Statements are not filesystem transactions. A failure during apply can follow
+successful or partial changes, which are reported separately. Rename and unlink
+operate on directory entries, so concurrent namespace changes cannot be made
+atomic with identity checks. Update undo validates the recorded post-change
+identity and refuses replacement objects. Directory identity checks use device
+and inode because changing children also changes the directory's ctime.
+
+A statement is refused during planning when:
 
 - `DELETE` or `UPDATE` has no `WHERE` clause
 - the `WHERE` clause is always true, such as `1 = 1`
-- more rows match than `--cap` allows (default 10000)
+
+Apply is refused when more rows match than `--cap` allows (default 10000).
+Mutation resolution requires a complete scan, including its subqueries.
 
 `DELETE` removes exactly the rows that matched. A directory is removed only if
 it is empty by then, so `where name = 'build'` fails on a populated directory
@@ -159,6 +175,18 @@ attributes when the journal is on another filesystem. Deleted directories and
 links are recorded, updates keep a before-image, inserts record what was
 created.
 
+Journals persist an intent before each operation and synchronize completion
+records after the filesystem change. A partially created file is recorded for
+undo even when a later attribute update fails. Special files that cannot be
+recreated are refused when journaling is enabled.
+
+Interrupted operations retain their intent files and appear as
+`[RECOVERY REQUIRED]` in the journal list. Automatic undo refuses these journals:
+the recorded intent and current filesystem must be reconciled before manual
+recovery. Completed undo steps are checkpointed so they are not replayed.
+Legacy update records without object identity are also refused by automatic
+undo. This is conservative recovery fencing, not automatic crash rollback.
+
 ```sh
 fsql journal          list journals
 fsql undo ID          reverse one journal
@@ -170,6 +198,57 @@ fsql undo ID          reverse one journal
 
 `-f table` (default), `csv`, `tsv`, `json` (one object per line), `lines`.
 
+Simple queries stream with `json` and `lines`. Sorting, grouping, distinctness,
+CTEs and joins may need intermediate storage. Ordered queries with a limit
+retain only the best `limit + offset` rows when distinctness is not requested.
+Joins materialize requested columns; `USING` equijoins index their matching keys.
+
+Filesystem errors stop queries by default. `--best-effort` permits partial
+SELECT results, prints diagnostics and exits with status 1 when entries were
+skipped; it does not relax mutation resolution. A streaming query can emit rows
+before a later failure, so consumers must check its exit status.
+
+Execution defaults to budgets of 1,000,000 cumulative retained row allocations,
+256 MiB of estimated retained value allocations, and 10,000,000 work units.
+Use `--max-rows`, `--max-bytes`, `--max-work` and `--timeout SECONDS` to configure
+them. Allocation budgets include intermediate results and are conservative
+cumulative estimates, not process RSS limits. Cancellation and timeouts are
+checked between operations; they cannot interrupt a blocked filesystem syscall.
+
+## Library
+
+`Engine` provides opaque prepared queries and resolved mutations with execution
+policy captured at preparation time. The mutation cap also applies to library
+callers. Low-level modules remain available for callers managing their own
+plans and policies.
+
+```rust
+use fsql::{Engine, ErrorPolicy};
+use fsql::walk::WalkOptions;
+use std::ops::ControlFlow;
+
+fn main() -> fsql::Result<()> {
+    let mut engine = Engine::new(".", WalkOptions::default());
+    engine.execution.error_policy = ErrorPolicy::BestEffort;
+    let query = engine.prepare_query("select path from files where ext = 'rs'")?;
+    let completion = query.stream(&mut |columns, row| {
+        println!("{columns:?}: {row:?}");
+        Ok(ControlFlow::Continue(()))
+    })?;
+    assert!(completion.is_complete(), "{:?}", completion.diagnostics);
+    Ok(())
+}
+```
+
+`PreparedQuery::collect` returns a result set and the same completion report.
+`ExecutionOptions` also supplies a clonable cancellation token. Streaming
+callbacks can return `ControlFlow::Break(())` to stop consuming rows.
+
+`Engine::resolve_mutation` produces an inspectable `ResolvedMutation`; its
+consuming `apply(journal_base)` method creates the journal. Disabling recovery
+requires the explicit `apply_without_journal` method. Apply outcomes include
+completed entries, failures, partial changes and recovery-required journals.
+
 ## Build
 
 ```sh
@@ -177,16 +256,23 @@ cargo build --release
 cargo test --workspace
 ```
 
-`vendor/sqlparser` is a patched copy of `sqlparser-rs`; see `vendor/README.md`.
-`tree-fucker` is a git dependency on `github.com/kjanat/tree-fucker`, pinned in
+[`vendor/sqlparser`] is a patched copy of [`sqlparser-rs`]; see `vendor/README.md`.
+[`tree-fucker`] is a git dependency on `github.com/kjanat/tree-fucker`, pinned in
 `Cargo.lock`. Its one-shot `Scan` performs the `files` traversal. It lists each
 directory directly, never follows a symbolic link, and applies the mount-crossing
 policy at every domain boundary, so `-x` stays on the root's filesystem while a
 plain walk crosses into mounts beneath the root. Rows stream as each directory's
-listing completes. Every filesystem operation runs under tree-fucker's
-process-wide resource governor, which fsql allows one full worker of foreground
-time. Columns beyond `path`, `name` and `kind` come from fsql's own `statx`,
-issued against the descriptor of the directory the row was listed from. The same
-library backs the `mounts` probe.
+listing completes. Traversal operations run under tree-fucker's process-wide
+resource governor, which the CLI allows one full worker of foreground time.
+fsql reads metadata lazily with its own `statx` and `readlinkat` calls. These
+follow-up reads use the listed directory's descriptor while an anchor is
+available, and an absolute path after the bounded anchor allowance is exhausted.
+They are separate from the traversal governor. The same library backs the
+`mounts` probe. Query cancellation also cancels active scans; resource-limit and
+quarantine events remain fatal even in best-effort mode.
+
+[`vendor/sqlparser`]: ./vendor/sqlparser/
+[`sqlparser-rs`]: https://github.com/apache/datafusion-sqlparser-rs
+[`tree-fucker`]: https://github.com/kjanat/tree-fucker
 
 <!-- rumdl-disable-file line-length -->

@@ -41,6 +41,29 @@ pub fn write(out: &mut dyn Write, set: &ResultSet, format: Format) -> io::Result
     }
 }
 
+/// Write a single record in a format that does not need whole-result layout.
+pub fn write_row(
+    out: &mut dyn Write,
+    headers: &[String],
+    row: &[Value],
+    format: Format,
+) -> io::Result<()> {
+    if !matches!(format, Format::Json | Format::Lines) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "streaming output requires json or lines",
+        ));
+    }
+    write(
+        out,
+        &ResultSet {
+            headers: headers.to_vec(),
+            rows: vec![row.to_vec()],
+        },
+        format,
+    )
+}
+
 fn cell(value: &Value) -> String {
     match value {
         Value::Null => String::new(),

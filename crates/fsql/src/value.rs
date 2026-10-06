@@ -24,7 +24,60 @@ pub enum Type {
     Timestamp,
 }
 
+/// Canonical SQL grouping identity. NULLs and NaNs each form one group;
+/// numerically equal integers and floats share a key, as do text and bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ValueKey {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(u64),
+    Bytes(Vec<u8>),
+    Timestamp(i64),
+}
+
+pub(crate) fn row_key(row: &[Value]) -> Vec<ValueKey> {
+    row.iter().map(Value::key).collect()
+}
+
+fn compare_int_float(integer: i64, float: f64) -> Option<Ordering> {
+    if float.is_nan() {
+        None
+    } else if float >= 9_223_372_036_854_775_808.0 {
+        Some(Ordering::Less)
+    } else if float < -9_223_372_036_854_775_808.0 {
+        Some(Ordering::Greater)
+    } else {
+        let whole = float as i64;
+        Some(integer.cmp(&whole).then_with(|| {
+            0.0_f64
+                .partial_cmp(&float.fract())
+                .unwrap_or(Ordering::Equal)
+        }))
+    }
+}
+
 impl Value {
+    pub(crate) fn key(&self) -> ValueKey {
+        match self {
+            Self::Null => ValueKey::Null,
+            Self::Bool(value) => ValueKey::Bool(*value),
+            Self::Int(value) => ValueKey::Int(*value),
+            Self::Float(value)
+                if compare_int_float(*value as i64, *value) == Some(Ordering::Equal) =>
+            {
+                ValueKey::Int(*value as i64)
+            }
+            Self::Float(value) => ValueKey::Float(if value.is_nan() {
+                f64::NAN.to_bits()
+            } else {
+                value.to_bits()
+            }),
+            Self::Text(value) => ValueKey::Bytes(value.as_bytes().to_vec()),
+            Self::Blob(value) => ValueKey::Bytes(value.clone()),
+            Self::Timestamp(value) => ValueKey::Timestamp(value.0),
+        }
+    }
     pub fn type_of(&self) -> Option<Type> {
         match self {
             Self::Null => None,
@@ -68,8 +121,8 @@ impl Value {
             (Self::Int(a), Self::Int(b)) => Some(a.cmp(b)),
             (Self::Timestamp(a), Self::Timestamp(b)) => Some(a.cmp(b)),
             (Self::Float(a), Self::Float(b)) => a.partial_cmp(b),
-            (Self::Int(a), Self::Float(b)) => (*a as f64).partial_cmp(b),
-            (Self::Float(a), Self::Int(b)) => a.partial_cmp(&(*b as f64)),
+            (Self::Int(a), Self::Float(b)) => compare_int_float(*a, *b),
+            (Self::Float(a), Self::Int(b)) => compare_int_float(*b, *a).map(Ordering::reverse),
             (a, b) => match (a.bytes(), b.bytes()) {
                 (Some(a), Some(b)) => Some(a.cmp(b)),
                 _ => None,
