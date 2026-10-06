@@ -31,17 +31,19 @@ The Rust execution parser remains unchanged.
 
 ## Development
 
-Use Node.js and tree-sitter CLI 0.26.8 (or install the pinned CLI with `npm ci`):
+Use Bun 1.4.2 and run these commands from the repository root. The root
+workspace manifest and `bun.lock` install tree-sitter CLI 0.26.8:
 
 ```sh
-cd tree-sitter-fsql
-npm run generate
-npm test
-npm run check
+bun install --frozen-lockfile
+bun run grammar:generate
+bun run grammar:test
+bun run grammar:check
 ```
 
-`npm test` runs the retained SQL corpus, fsql regression cases, error recovery,
-and highlighting assertions. `npm run check` parses the example files, compiles
+`bun run grammar:test` runs the retained SQL corpus, fsql regression cases, error recovery,
+and highlighting assertions. `bun run grammar:check` parses the example files, compiles
 the highlight and indent queries, and compares incremental edits with fresh parses.
 The examples are query files only; these checks never execute filesystem
-mutations. To run a file through fsql separately, use `fsql examples/browse.fsql`.
+mutations. To run a file through fsql separately, use
+`fsql tree-sitter-fsql/examples/browse.fsql` from the repository root.

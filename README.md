@@ -247,8 +247,8 @@ callers. Low-level modules remain available for callers managing their own
 plans and policies.
 
 ```rust
-use fsql::{Engine, ErrorPolicy};
 use fsql::walk::WalkOptions;
+use fsql::{Engine, ErrorPolicy};
 use std::ops::ControlFlow;
 
 fn main() -> fsql::Result<()> {
