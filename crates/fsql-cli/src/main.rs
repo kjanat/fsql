@@ -10,7 +10,7 @@ use fsql::journal::{self, Journal};
 use fsql::mutate::{self, Outcome, Resolved};
 use fsql::output::{self, Format};
 use fsql::plan::{Plan, Planner};
-use fsql::walk::WalkOptions;
+use fsql::walk::{self, WalkOptions};
 
 #[derive(Parser)]
 #[command(name = "fsql", version, about = "SQL over the filesystem")]
@@ -80,6 +80,10 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Err(error) = walk::install_governor() {
+        eprintln!("fsql: {error}");
+        return ExitCode::from(2);
+    }
     match run(cli) {
         Ok(code) => code,
         Err(error) => {

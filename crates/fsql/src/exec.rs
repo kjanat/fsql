@@ -1355,10 +1355,11 @@ fn select_simple<'a>(
     for row in rows {
         let row = match row {
             Ok(row) => row,
-            Err(error) => {
+            Err(error) if skippable(&error) => {
                 report(ctx, error);
                 continue;
             }
+            Err(error) => return Err(error),
         };
         let step = (|| -> Result<Option<(Vec<Value>, Vec<Value>)>> {
             if !passes(evaluator, plan.filter.as_ref(), &row)? {
@@ -1425,10 +1426,11 @@ fn select_grouped<'a>(
     for row in rows {
         let row = match row {
             Ok(row) => row,
-            Err(error) => {
+            Err(error) if skippable(&error) => {
                 report(ctx, error);
                 continue;
             }
+            Err(error) => return Err(error),
         };
         let step = (|| -> Result<()> {
             if !passes(evaluator, plan.filter.as_ref(), &row)? {

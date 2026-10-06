@@ -31,6 +31,10 @@ pub enum Error {
     Unsupported(String),
     Plan(String),
     Stale(PathBuf),
+    Walk {
+        root: PathBuf,
+        reason: String,
+    },
     Io {
         path: PathBuf,
         source: std::io::Error,
@@ -71,6 +75,9 @@ impl fmt::Display for Error {
                 "{} changed between resolve and apply, nothing was touched",
                 path.display()
             ),
+            Self::Walk { root, reason } => {
+                write!(f, "walk of {} stopped: {reason}", root.display())
+            }
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
         }
     }

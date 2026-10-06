@@ -1,12 +1,13 @@
 use std::cell::OnceCell;
-use std::ffi::{CString, OsStr, OsString};
-use std::os::fd::OwnedFd;
+use std::ffi::{CStr, CString, OsStr, OsString};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 
-use rustix::fs::{AtFlags, FileType, Statx, StatxFlags};
+use rustix::fs::{AtFlags, CWD, FileType, Statx, StatxFlags};
+use tree_fucker::fs::Anchor;
+use tree_fucker::std_fs::DirectoryAnchor;
 use uzers::{Groups, Users, UsersCache};
 
 use crate::column::Column;
@@ -126,7 +127,8 @@ pub struct Frozen {
 
 pub struct Entry {
     shared: Rc<Shared>,
-    dir: Arc<OwnedFd>,
+    anchor: Option<Anchor>,
+    full: OnceCell<CString>,
     name: CString,
     path: PathBuf,
     depth: u32,
@@ -138,38 +140,59 @@ pub struct Entry {
 impl Entry {
     pub fn new(
         shared: Rc<Shared>,
-        dir: Arc<OwnedFd>,
-        name: CString,
+        anchor: Option<Anchor>,
         path: PathBuf,
         depth: u32,
         kind_hint: Kind,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let nul = |path: &Path| Error::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("path contains a NUL byte"),
+        };
+        let name = match path.file_name() {
+            Some(name) => CString::new(name.as_bytes()),
+            None => CString::new(&b"."[..]),
+        }
+        .map_err(|_| nul(&path))?;
+        Ok(Self {
             shared,
-            dir,
+            anchor,
+            full: OnceCell::new(),
             name,
             path,
             depth,
             kind_hint,
             stat: OnceCell::new(),
             target: OnceCell::new(),
-        }
-    }
-
-    pub fn dir(&self) -> &Arc<OwnedFd> {
-        &self.dir
+        })
     }
 
     pub fn name(&self) -> &OsStr {
         OsStr::from_bytes(self.name.as_bytes())
     }
 
-    pub fn name_c(&self) -> &CString {
-        &self.name
-    }
-
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn anchored(&self) -> bool {
+        self.directory().is_some()
+    }
+
+    fn directory(&self) -> Option<&DirectoryAnchor> {
+        self.anchor.as_ref()?.get::<DirectoryAnchor>()
+    }
+
+    fn at(&self) -> (BorrowedFd<'_>, &CStr) {
+        match self.directory() {
+            Some(directory) => (directory.as_fd(), &self.name),
+            None => (CWD, self.full()),
+        }
+    }
+
+    fn full(&self) -> &CStr {
+        self.full
+            .get_or_init(|| CString::new(self.path.as_os_str().as_bytes()).unwrap_or_default())
     }
 
     pub fn depth(&self) -> u32 {
@@ -179,7 +202,8 @@ impl Entry {
     pub fn stat(&self) -> Result<&Statx> {
         self.stat
             .get_or_init(|| {
-                rustix::fs::statx(&self.dir, &self.name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
+                let (directory, name) = self.at();
+                rustix::fs::statx(directory, name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
             })
             .as_ref()
             .map_err(|errno| Error::Io {
@@ -227,7 +251,8 @@ impl Entry {
             return Ok(None);
         }
         let target = self.target.get_or_init(|| {
-            rustix::fs::readlinkat(&self.dir, &self.name, Vec::new())
+            let (directory, name) = self.at();
+            rustix::fs::readlinkat(directory, name, Vec::new())
                 .ok()
                 .map(CString::into_bytes)
         });
@@ -238,7 +263,8 @@ impl Entry {
         if self.kind()? != Kind::Symlink {
             return Ok(None);
         }
-        let followed = rustix::fs::statx(&self.dir, &self.name, AtFlags::empty(), StatxFlags::TYPE);
+        let (directory, name) = self.at();
+        let followed = rustix::fs::statx(directory, name, AtFlags::empty(), StatxFlags::TYPE);
         Ok(Some(followed.is_err()))
     }
 }
