@@ -1,3 +1,5 @@
+//! SQL query and mutation engine over the filesystem.
+
 pub mod column;
 pub mod dialect;
 pub mod error;
