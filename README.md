@@ -178,6 +178,15 @@ cargo test --workspace
 ```
 
 `vendor/sqlparser` is a patched copy of `sqlparser-rs`; see `vendor/README.md`.
-`tree-fucker` is a git dependency on `github.com/kjanat/tree-fucker`, pinned in `Cargo.lock`.
+`tree-fucker` is a git dependency on `github.com/kjanat/tree-fucker`, pinned in
+`Cargo.lock`. Its one-shot `Scan` performs the `files` traversal. It lists each
+directory directly, never follows a symbolic link, and applies the mount-crossing
+policy at every domain boundary, so `-x` stays on the root's filesystem while a
+plain walk crosses into mounts beneath the root. Rows stream as each directory's
+listing completes. Every filesystem operation runs under tree-fucker's
+process-wide resource governor, which fsql allows one full worker of foreground
+time. Columns beyond `path`, `name` and `kind` come from fsql's own `statx`,
+issued against the descriptor of the directory the row was listed from. The same
+library backs the `mounts` probe.
 
 <!-- rumdl-disable-file line-length -->

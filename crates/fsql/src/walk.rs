@@ -1,12 +1,22 @@
-use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
-use rustix::fs::{AtFlags, CWD, Dir, Mode, OFlags, StatxFlags};
+use rustix::fs::{CWD, Mode, OFlags};
+use rustix::io::Errno;
+use rustix::process::{Resource, getrlimit};
+use tree_fucker::domain::DomainCrossing;
+use tree_fucker::entry::EntryKind;
+use tree_fucker::fs::{FsError, ObservedKind};
+use tree_fucker::path::RelativePath;
+use tree_fucker::policy::{LoadAll, LoadDepth, ScanPolicy};
+use tree_fucker::scan::{Scan, ScanEntry, ScanEvent, ScanFailure, ScanOptions};
+use tree_fucker::std_fs::StdFileSystem;
+use tree_fucker::{HostConfig, HostGovernor, HostGovernorError};
 
 use crate::error::{Error, Result};
 use crate::row::{Entry, Kind, Shared};
@@ -23,25 +33,25 @@ pub struct WalkOptions {
     pub initial_depth: u32,
 }
 
-struct Frame {
-    fd: Arc<OwnedFd>,
-    path: PathBuf,
-    depth: u32,
-    entries: Dir,
-}
-
-pub struct Walker {
-    shared: Rc<Shared>,
-    options: WalkOptions,
-    root_mount: Option<u64>,
-    pending: VecDeque<Result<Entry>>,
-    stack: Vec<Frame>,
+pub fn install_governor() -> std::result::Result<HostGovernor, HostGovernorError> {
+    HostGovernor::install(HostConfig {
+        foreground_duty: 1.0,
+        domain_foreground_duty: 1.0,
+        ..HostConfig::default()
+    })
 }
 
 pub fn c_name(name: &std::ffi::OsStr, path: &Path) -> Result<CString> {
     CString::new(name.as_bytes()).map_err(|_| Error::Io {
         path: path.to_path_buf(),
         source: std::io::Error::other("path contains a NUL byte"),
+    })
+}
+
+fn open_dir(dirfd: impl rustix::fd::AsFd, name: &CStr, path: &Path) -> Result<OwnedFd> {
+    rustix::fs::openat(dirfd, name, DIR_FLAGS, Mode::empty()).map_err(|errno| Error::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::from(errno),
     })
 }
 
@@ -59,151 +69,107 @@ pub fn open_chain(directory: &Path) -> Result<OwnedFd> {
     Ok(fd)
 }
 
-pub fn open_root(root: &Path) -> Result<(Arc<OwnedFd>, CString, PathBuf)> {
-    let canonical = std::fs::canonicalize(root).map_err(|source| Error::Io {
-        path: root.to_path_buf(),
-        source,
-    })?;
-    let (parent, name) = match (canonical.parent(), canonical.file_name()) {
-        (Some(parent), Some(name)) => (parent.to_path_buf(), c_name(name, &canonical)?),
-        _ => (canonical.clone(), c".".to_owned()),
-    };
-    let fd = open_chain(&parent)?;
-    Ok((Arc::new(fd), name, canonical))
+fn kind_of(kind: ObservedKind) -> Kind {
+    match kind {
+        ObservedKind::Resolved(EntryKind::File) => Kind::File,
+        ObservedKind::Resolved(EntryKind::Directory) => Kind::Dir,
+        ObservedKind::Resolved(EntryKind::Symlink) => Kind::Symlink,
+        ObservedKind::Resolved(EntryKind::Other) | ObservedKind::Unresolved => Kind::Unknown,
+    }
 }
 
-fn open_dir(dirfd: impl rustix::fd::AsFd, name: &CStr, path: &Path) -> Result<OwnedFd> {
-    rustix::fs::openat(dirfd, name, DIR_FLAGS, Mode::empty()).map_err(|errno| Error::Io {
+fn io_error(error: &FsError) -> std::io::Error {
+    match error {
+        FsError::NotFound => Errno::NOENT.into(),
+        FsError::NotDirectory => Errno::NOTDIR.into(),
+        FsError::PermissionDenied => Errno::ACCESS.into(),
+        other => std::io::Error::other(other.to_string()),
+    }
+}
+
+fn scan_error(path: &Path, error: &tree_fucker::Error) -> Error {
+    let source = match error {
+        tree_fucker::Error::NotFound => Errno::NOENT.into(),
+        tree_fucker::Error::NotDirectory => Errno::NOTDIR.into(),
+        tree_fucker::Error::Io(error) => io_error(error),
+        other => std::io::Error::other(other.to_string()),
+    };
+    Error::Io {
         path: path.to_path_buf(),
-        source: std::io::Error::from(errno),
-    })
+        source,
+    }
+}
+
+fn anchor_limit() -> usize {
+    let open_files = getrlimit(Resource::Nofile).current.unwrap_or(u64::MAX);
+    usize::try_from(open_files / 4).unwrap_or(usize::MAX)
+}
+
+pub struct Walker {
+    shared: Rc<Shared>,
+    scan: Scan,
+    root: PathBuf,
+    initial_depth: u32,
+    directory: Option<(RelativePath, PathBuf)>,
 }
 
 impl Walker {
     pub fn new(root: &Path, options: WalkOptions) -> Result<Self> {
-        let shared = Shared::new();
-        let (parent, name, canonical) = open_root(root)?;
-        let root_entry = Entry::new(
-            shared.clone(),
-            parent,
-            name,
-            canonical,
-            options.initial_depth,
-            Kind::Dir,
-        );
-        let root_mount = if options.one_filesystem {
-            root_entry.mount_id()?
-        } else {
-            None
+        let policy: Arc<dyn ScanPolicy> = match options.max_depth {
+            Some(max) => Arc::new(LoadDepth {
+                depth: max.saturating_sub(options.initial_depth) as usize,
+            }),
+            None => Arc::new(LoadAll),
         };
-        let mut walker = Self {
-            shared,
-            options,
-            root_mount,
-            pending: VecDeque::new(),
-            stack: Vec::new(),
+        let scan_options = ScanOptions {
+            crossing: match options.one_filesystem {
+                true => DomainCrossing::Exclude,
+                false => DomainCrossing::Follow,
+            },
+            anchors: anchor_limit(),
+            ceiling: Duration::MAX,
+            ..ScanOptions::default()
         };
-        walker.descend(&root_entry);
-        walker.pending.push_back(Ok(root_entry));
-        Ok(walker)
+        let scan = Scan::open(
+            Arc::new(StdFileSystem::new()),
+            root.to_path_buf(),
+            policy,
+            scan_options,
+        )
+        .map_err(|error| scan_error(root, &error))?;
+        let root = scan.root().to_path_buf();
+        Ok(Self {
+            shared: Shared::new(),
+            scan,
+            root,
+            initial_depth: options.initial_depth,
+            directory: None,
+        })
     }
 
-    fn descend(&mut self, entry: &Entry) {
-        if let Some(max) = self.options.max_depth
-            && entry.depth() >= max
-        {
-            return;
-        }
-        if self.root_mount.is_some() {
-            match entry.mount_id() {
-                Ok(mount) if mount != self.root_mount => return,
-                Ok(_) => {}
-                Err(error) => {
-                    self.pending.push_back(Err(error));
-                    return;
-                }
-            }
-        }
-        let fd = match open_dir(entry.dir(), entry.name_c(), entry.path()) {
-            Ok(fd) => Arc::new(fd),
-            Err(error) => {
-                self.pending.push_back(Err(error));
-                return;
-            }
+    fn absolute(&mut self, entry: &ScanEntry) -> PathBuf {
+        let (Some(directory), Some(name)) = (entry.path.directory(), entry.path.name()) else {
+            return self.root.clone();
         };
-        if self.root_mount.is_some() {
-            let stat = rustix::fs::statx(&fd, c"", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID);
-            match stat {
-                Ok(stat)
-                    if stat.stx_mask & StatxFlags::MNT_ID.bits() != 0
-                        && Some(stat.stx_mnt_id) != self.root_mount =>
-                {
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let entries = match Dir::read_from(&fd) {
-            Ok(entries) => entries,
-            Err(errno) => {
-                self.pending.push_back(Err(Error::Io {
-                    path: entry.path().to_path_buf(),
-                    source: std::io::Error::from(errno),
-                }));
-                return;
-            }
+        let held = match self.directory.take() {
+            Some((cached, absolute)) if cached == *directory => (cached, absolute),
+            _ => (directory.clone(), directory.under(&self.root)),
         };
-        self.stack.push(Frame {
-            fd,
-            path: entry.path().to_path_buf(),
-            depth: entry.depth() + 1,
-            entries,
-        });
+        let path = held.1.join(name);
+        self.directory = Some(held);
+        path
     }
 
-    fn next_from_stack(&mut self) -> Option<Result<Entry>> {
-        loop {
-            let frame = self.stack.last_mut()?;
-            let Some(dirent) = frame.entries.next() else {
-                self.stack.pop();
-                continue;
-            };
-            let dirent = match dirent {
-                Ok(dirent) => dirent,
-                Err(errno) => {
-                    let path = frame.path.clone();
-                    self.stack.pop();
-                    return Some(Err(Error::Io {
-                        path,
-                        source: std::io::Error::from(errno),
-                    }));
-                }
-            };
-            let name = dirent.file_name();
-            if name.to_bytes() == b"." || name.to_bytes() == b".." {
-                continue;
-            }
-            let path = frame
-                .path
-                .join(std::ffi::OsStr::from_bytes(name.to_bytes()));
-            let entry = Entry::new(
-                self.shared.clone(),
-                frame.fd.clone(),
-                name.to_owned(),
-                path,
-                frame.depth,
-                Kind::from_file_type(dirent.file_type()),
-            );
-            match entry.is_dir() {
-                Ok(true) => self.descend(&entry),
-                Ok(false) => {}
-                Err(error) => {
-                    self.pending.push_back(Err(error));
-                    continue;
-                }
-            }
-            return Some(Ok(entry));
-        }
+    fn entry(&mut self, entry: ScanEntry) -> Result<Entry> {
+        let depth = u32::try_from(entry.path.depth()).unwrap_or(u32::MAX);
+        let path = self.absolute(&entry);
+        Entry::new(
+            self.shared.clone(),
+            entry.anchor,
+            path,
+            self.initial_depth.saturating_add(depth),
+            kind_of(entry.kind),
+        )
     }
 }
 
@@ -211,19 +177,30 @@ impl Iterator for Walker {
     type Item = Result<Entry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(pending) = self.pending.pop_front() {
-            return Some(pending);
+        loop {
+            return Some(match self.scan.next()? {
+                Ok(ScanEvent::Entry(entry)) => self.entry(entry),
+                Ok(ScanEvent::Boundary { .. }) => continue,
+                Ok(ScanEvent::Unlisted { path, failure }) => Err(Error::Io {
+                    path: path.under(&self.root),
+                    source: match &failure {
+                        ScanFailure::Fs(error) => io_error(error),
+                        other => std::io::Error::other(other.to_string()),
+                    },
+                }),
+                Err(error) => Err(scan_error(&self.root, &error)),
+            });
         }
-        self.next_from_stack()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
     use super::*;
     use crate::eval::Row;
     use crate::value::Value;
-    use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn fixture(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fsql-walk-{}-{name}", std::process::id()));
@@ -251,6 +228,7 @@ mod tests {
         let dir = fixture("all");
         let walker = Walker::new(&dir, WalkOptions::default()).expect("walker");
         let found = names(walker);
+        let canonical = std::fs::canonicalize(&dir).expect("canonical");
         let expected: Vec<String> = [
             "",
             "/a.txt",
@@ -262,7 +240,7 @@ mod tests {
             "/sub/deeper/.hidden",
         ]
         .iter()
-        .map(|suffix| format!("{}{suffix}", dir.display()))
+        .map(|suffix| format!("{}{suffix}", canonical.display()))
         .collect();
         assert_eq!(found, expected);
         let _ = std::fs::remove_dir_all(&dir);
@@ -288,6 +266,7 @@ mod tests {
     #[test]
     fn columns_come_from_the_dirent_and_statx() {
         let dir = fixture("columns");
+        let canonical = std::fs::canonicalize(&dir).expect("canonical");
         let walker = Walker::new(&dir, WalkOptions::default()).expect("walker");
         for entry in walker {
             let entry = entry.expect("entry");
@@ -318,7 +297,7 @@ mod tests {
                     assert_eq!(entry.column("depth").expect("depth"), Value::Int(2));
                     assert_eq!(
                         entry.column("parent").expect("parent"),
-                        Value::Text(dir.join("sub").to_string_lossy().into())
+                        Value::Text(canonical.join("sub").to_string_lossy().into())
                     );
                 }
                 ".hidden" => {
@@ -365,14 +344,62 @@ mod tests {
     #[test]
     fn frozen_rows_carry_identity() {
         let dir = fixture("frozen");
+        let canonical = std::fs::canonicalize(&dir).expect("canonical");
         let walker = Walker::new(&dir, WalkOptions::default()).expect("walker");
         let frozen: Vec<_> = walker
             .map(|e| e.expect("entry").freeze().expect("freeze"))
             .collect();
         let file = frozen.iter().find(|f| f.name == "a.txt").expect("a.txt");
-        assert_eq!(file.parent, dir);
+        assert_eq!(file.parent, canonical);
         assert_eq!(file.kind, Kind::File);
         assert!(file.identity.ino > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rows_read_their_columns_through_the_directory_they_were_listed_from() {
+        let dir = fixture("anchored");
+        let walker = Walker::new(&dir, WalkOptions::default()).expect("walker");
+        let rows: Vec<Entry> = walker.map(|entry| entry.expect("entry")).collect();
+        assert!(
+            rows.iter()
+                .filter(|row| row.depth() > 0)
+                .all(Entry::anchored)
+        );
+        let moved = dir.with_file_name(format!("fsql-walk-{}-anchored-moved", std::process::id()));
+        let _ = std::fs::remove_dir_all(&moved);
+        std::fs::rename(&dir, &moved).expect("rename");
+        let file = rows
+            .iter()
+            .find(|row| row.name() == "a.txt")
+            .expect("a.txt");
+        assert_eq!(file.column("size").expect("size"), Value::Int(5));
+        let link = rows.iter().find(|row| row.name() == "link").expect("link");
+        assert_eq!(
+            link.column("target").expect("target"),
+            Value::Text("a.txt".into())
+        );
+        let _ = std::fs::remove_dir_all(&moved);
+    }
+
+    #[test]
+    fn a_depth_limit_counts_from_the_initial_depth() {
+        let dir = fixture("offset");
+        let walker = Walker::new(
+            &dir,
+            WalkOptions {
+                max_depth: Some(3),
+                initial_depth: 2,
+                ..WalkOptions::default()
+            },
+        )
+        .expect("walker");
+        let rows: Vec<Entry> = walker.map(|entry| entry.expect("entry")).collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.name() == "sub" && row.depth() == 3)
+        );
+        assert!(rows.iter().all(|row| row.depth() <= 3));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
