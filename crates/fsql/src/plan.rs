@@ -304,10 +304,14 @@ impl Planner {
 
     pub fn plan(&self, sql: &str) -> Result<Vec<Plan>> {
         let statements = Parser::parse_sql(&FsqlDialect, sql)?;
-        statements
+        let plans = statements
             .iter()
             .map(|statement| self.statement(statement))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        for plan in &plans {
+            crate::bind::plan(plan, self)?;
+        }
+        Ok(plans)
     }
 
     fn statement(&self, statement: &Statement) -> Result<Plan> {
@@ -474,6 +478,7 @@ impl Planner {
             && clause.joins.is_empty()
             && let Relation::Table { source, .. } = &mut clause.relation
             && source.table == Table::Files
+            && !source.options.one_filesystem
             && let Some(filter) = &select.selection
             && let Some((root, depth)) = narrow(&source.root, filter)
         {
@@ -650,7 +655,9 @@ impl Planner {
                 source.table.name()
             )));
         }
-        if let Some((root, depth)) = narrow(&source.root, filter) {
+        if !source.options.one_filesystem
+            && let Some((root, depth)) = narrow(&source.root, filter)
+        {
             source.root = root;
             source.options.initial_depth = depth;
         }

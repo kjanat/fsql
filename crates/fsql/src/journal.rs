@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::row::Identity;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attrs {
@@ -37,6 +38,8 @@ pub enum Record {
         kind: String,
         before: Attrs,
         after: Attrs,
+        #[serde(default)]
+        identity: Option<Identity>,
     },
     Insert {
         seq: u64,
@@ -85,10 +88,16 @@ pub struct Journal {
 
 impl Journal {
     pub fn open(base: &Path, sql: &str) -> Result<Self> {
+        std::fs::create_dir_all(base).map_err(|e| io(base, e))?;
         let nanos = crate::time::now().0;
         let id = format!("{:x}-{:x}", nanos, std::process::id());
         let dir = base.join(&id);
-        std::fs::create_dir_all(dir.join("tomb")).map_err(|e| io(&dir, e))?;
+        std::fs::create_dir(&dir).map_err(|e| io(&dir, e))?;
+        let dir = std::fs::canonicalize(&dir).map_err(|e| io(&dir, e))?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| io(&dir, e))?;
+        std::fs::create_dir(dir.join("tomb")).map_err(|e| io(&dir, e))?;
         std::fs::write(dir.join("statement.sql"), sql).map_err(|e| io(&dir, e))?;
         let log_path = dir.join("log.jsonl");
         let log = OpenOptions::new()
@@ -96,6 +105,12 @@ impl Journal {
             .append(true)
             .open(&log_path)
             .map_err(|e| io(&log_path, e))?;
+        File::open(dir.join("statement.sql"))
+            .and_then(|f| f.sync_all())
+            .map_err(|e| io(&dir, e))?;
+        log.sync_all().map_err(|e| io(&log_path, e))?;
+        sync_dir(&dir)?;
+        sync_dir(base)?;
         Ok(Self {
             id,
             dir,
@@ -116,8 +131,33 @@ impl Journal {
         self.seq
     }
 
+    pub(crate) fn reserve_seq(&mut self) -> u64 {
+        let seq = self.seq;
+        self.seq += 1;
+        seq
+    }
+
     pub fn tomb_path(&self, seq: u64) -> PathBuf {
         self.dir.join("tomb").join(seq.to_string())
+    }
+
+    /// Persist intent before issuing a syscall. An unfinished intent prevents
+    /// automatic undo, preserving the evidence for explicit reconciliation.
+    pub fn begin(&mut self, record: &Record) -> Result<()> {
+        let path = self.dir.join(format!("pending-{}.json", record.seq()));
+        let data = serde_json::to_vec(record).map_err(|e| Error::Plan(e.to_string()))?;
+        durable_create(&path, &data)?;
+        self.seq = self.seq.max(record.seq() + 1);
+        Ok(())
+    }
+
+    pub fn cancel(&self, seq: u64) -> Result<()> {
+        let path = self.dir.join(format!("pending-{seq}.json"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => sync_dir(&self.dir),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io(&path, e)),
+        }
     }
 
     pub fn record(&mut self, record: Record) -> Result<()> {
@@ -126,10 +166,10 @@ impl Journal {
         self.log
             .write_all(line.as_bytes())
             .and_then(|_| self.log.write_all(b"\n"))
-            .and_then(|_| self.log.flush())
+            .and_then(|_| self.log.sync_all())
             .map_err(|e| io(&log_path, e))?;
-        self.seq = record.seq() + 1;
-        Ok(())
+        self.seq = self.seq.max(record.seq() + 1);
+        self.cancel(record.seq())
     }
 }
 
@@ -137,6 +177,7 @@ pub struct Summary {
     pub id: String,
     pub statement: String,
     pub records: usize,
+    pub recovery_required: bool,
 }
 
 pub fn list(base: &Path) -> Result<Vec<Summary>> {
@@ -149,15 +190,21 @@ pub fn list(base: &Path) -> Result<Vec<Summary>> {
     for entry in entries {
         let entry = entry.map_err(|e| io(base, e))?;
         let dir = entry.path();
+        if dir.join("finished").exists() {
+            continue;
+        }
         let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
         let statement = std::fs::read_to_string(dir.join("statement.sql")).unwrap_or_default();
-        let records = load(base, id).map(|r| r.len()).unwrap_or(0);
+        let loaded = load(base, id);
+        let recovery_required = loaded.is_err();
+        let records = loaded.map(|r| r.len()).unwrap_or(0);
         summaries.push(Summary {
             id: id.to_owned(),
             statement,
             records,
+            recovery_required,
         });
     }
     summaries.sort_by(|a, b| a.id.cmp(&b.id));
@@ -165,6 +212,28 @@ pub fn list(base: &Path) -> Result<Vec<Summary>> {
 }
 
 pub fn load(base: &Path, id: &str) -> Result<Vec<Record>> {
+    validate_id(id)?;
+    let dir = base.join(id);
+    if dir.join("finished").exists() {
+        return Ok(Vec::new());
+    }
+    for entry in std::fs::read_dir(&dir).map_err(|e| io(&dir, e))? {
+        let entry = entry.map_err(|e| io(&dir, e))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("pending-") || name.starts_with("undo-pending-") {
+            return Err(Error::RecoveryRequired(entry.path()));
+        }
+        if name.starts_with("replay-") && name.ends_with(".json") {
+            let seq = name.trim_start_matches("replay-").trim_end_matches(".json");
+            if !dir.join(format!("complete-{seq}.json")).exists() || dir.join("undoing").exists() {
+                return Err(Error::RecoveryRequired(entry.path()));
+            }
+        }
+        if name.starts_with("prepare-") && name.ends_with(".json") {
+            return Err(Error::RecoveryRequired(entry.path()));
+        }
+    }
     let log_path = base.join(id).join("log.jsonl");
     let file = File::open(&log_path).map_err(|e| io(&log_path, e))?;
     let mut records = Vec::new();
@@ -175,14 +244,112 @@ pub fn load(base: &Path, id: &str) -> Result<Vec<Record>> {
         }
         let record: Record = serde_json::from_str(&line)
             .map_err(|e| Error::Plan(format!("{}: {e}", log_path.display())))?;
-        records.push(record);
+        if !dir.join(format!("undone-{}", record.seq())).exists() {
+            records.push(record);
+        }
     }
+    for entry in std::fs::read_dir(&dir).map_err(|e| io(&dir, e))? {
+        let entry = entry.map_err(|e| io(&dir, e))?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("complete-")
+            && name.to_string_lossy().ends_with(".json")
+        {
+            let record: Record = serde_json::from_slice(
+                &std::fs::read(entry.path()).map_err(|e| io(&entry.path(), e))?,
+            )
+            .map_err(|e| Error::Plan(e.to_string()))?;
+            if !dir.join(format!("undone-{}", record.seq())).exists() {
+                records.push(record);
+            }
+        }
+    }
+    records.sort_by_key(Record::seq);
     Ok(records)
 }
 
 pub fn remove(base: &Path, id: &str) -> Result<()> {
+    validate_id(id)?;
     let dir = base.join(id);
-    std::fs::remove_dir_all(&dir).map_err(|e| io(&dir, e))
+    std::fs::remove_dir_all(&dir).map_err(|e| io(&dir, e))?;
+    sync_dir(base)
+}
+
+pub(crate) fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty() || !id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
+        return Err(Error::Plan("invalid journal id".into()));
+    }
+    Ok(())
+}
+
+pub(crate) struct Lock(File);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // Closing alone can leave a flock held briefly by an unrelated child
+        // forked on another thread before its close-on-exec descriptors close.
+        let _ = self.0.unlock();
+    }
+}
+
+pub(crate) fn lock(dir: &Path) -> Result<Lock> {
+    let path = dir.join("lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| io(&path, e))?;
+    file.try_lock()
+        .map_err(|e| Error::Plan(format!("journal {} is busy: {e}", dir.display())))?;
+    Ok(Lock(file))
+}
+
+/// Publish a complete checkpoint; a torn temporary file is never replayed.
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+    let temporary = path.with_extension("tmp");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|e| io(&temporary, e))?;
+    file.write_all(data)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| io(&temporary, e))?;
+    std::fs::rename(&temporary, path).map_err(|e| io(path, e))?;
+    sync_dir(path.parent().expect("journal parent"))
+}
+
+pub(crate) fn sync_dir(path: &Path) -> Result<()> {
+    File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| io(path, e))
+}
+
+fn durable_create(path: &Path, data: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| io(path, e))?;
+    file.write_all(data)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| io(path, e))?;
+    sync_dir(path.parent().expect("journal parent"))
+}
+
+pub(crate) fn begin_undo(base: &Path, id: &str, seq: u64) -> Result<()> {
+    durable_create(&base.join(id).join(format!("undo-pending-{seq}")), b"")
+}
+
+pub(crate) fn finish_undo(base: &Path, id: &str, seq: u64) -> Result<()> {
+    let dir = base.join(id);
+    std::fs::rename(
+        dir.join(format!("undo-pending-{seq}")),
+        dir.join(format!("undone-{seq}")),
+    )
+    .map_err(|e| io(&dir, e))?;
+    sync_dir(&dir)
 }
 
 #[cfg(test)]
@@ -230,5 +397,31 @@ mod tests {
         remove(&base, journal.id()).expect("remove");
         assert!(list(&base).expect("list").is_empty());
         let _ = std::fs::remove_dir_all(&base);
+    }
+    #[test]
+    fn failed_completion_keeps_intent_and_never_reuses_its_sequence() {
+        let base =
+            std::env::temp_dir().join(format!("fsql-journal-failure-{}", std::process::id()));
+        let mut journal = Journal::open(&base, "insert").expect("open");
+        let record = Record::Insert {
+            seq: 0,
+            path: b"/fixture".to_vec(),
+            kind: "file".into(),
+            dev: 1,
+            ino: 2,
+            ctime: 3,
+        };
+        journal.begin(&record).expect("intent");
+        journal.log = OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("failure device");
+        assert!(journal.record(record).is_err());
+        assert_eq!(journal.next_seq(), 1);
+        assert!(matches!(
+            load(&base, journal.id()),
+            Err(Error::RecoveryRequired(_))
+        ));
+        std::fs::remove_dir_all(base).expect("cleanup");
     }
 }

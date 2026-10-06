@@ -31,6 +31,9 @@ pub enum Error {
     Unsupported(String),
     Plan(String),
     Stale(PathBuf),
+    RecoveryRequired(PathBuf),
+    Incomplete(usize),
+    ResourceLimit(String),
     Walk {
         root: PathBuf,
         reason: String,
@@ -72,9 +75,16 @@ impl fmt::Display for Error {
             Self::Plan(reason) => write!(f, "{reason}"),
             Self::Stale(path) => write!(
                 f,
-                "{} changed between resolve and apply, nothing was touched",
+                "{} no longer matches the recorded identity",
                 path.display()
             ),
+            Self::RecoveryRequired(path) => write!(
+                f,
+                "{} contains an interrupted operation; recovery must be reconciled before continuing",
+                path.display()
+            ),
+            Self::Incomplete(count) => write!(f, "scan is incomplete ({count} filesystem errors)"),
+            Self::ResourceLimit(reason) => write!(f, "execution stopped: {reason}"),
             Self::Walk { root, reason } => {
                 write!(f, "walk of {} stopped: {reason}", root.display())
             }

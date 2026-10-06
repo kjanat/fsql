@@ -81,14 +81,18 @@ fn xattr_rows(entry: &Entry) -> Vec<Result<Box<dyn Row>>> {
 
 pub fn rows<'a>(source: &Source) -> Result<RowStream<'a>> {
     let walker = Walker::new(&source.root, source.options.clone())?;
-    Ok(Box::new(
+    Ok(rows_from(walker))
+}
+
+pub(crate) fn rows_from<'a>(walker: Walker) -> RowStream<'a> {
+    Box::new(
         walker
             .flat_map(|entry| match entry {
                 Ok(entry) => xattr_rows(&entry),
                 Err(error) => vec![Err(error)],
             })
             .map(|row| row.map(|row| row as Box<dyn Row + 'a>)),
-    ))
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,14 +197,18 @@ fn acl_rows_for(entry: &Entry) -> Vec<Result<Box<dyn Row>>> {
 
 pub fn acl_rows<'a>(source: &Source) -> Result<RowStream<'a>> {
     let walker = Walker::new(&source.root, source.options.clone())?;
-    Ok(Box::new(
+    Ok(acls_from(walker))
+}
+
+pub(crate) fn acls_from<'a>(walker: Walker) -> RowStream<'a> {
+    Box::new(
         walker
             .flat_map(|entry| match entry {
                 Ok(entry) => acl_rows_for(&entry),
                 Err(error) => vec![Err(error)],
             })
             .map(|row| row.map(|row| row as Box<dyn Row + 'a>)),
-    ))
+    )
 }
 
 #[cfg(test)]
