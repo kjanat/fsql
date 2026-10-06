@@ -1,0 +1,7 @@
+#:schema https://www.schemastore.org/cargo-config.json
+
+[alias]
+"clippy:2"  = "clippy --workspace --all-targets --locked -j 2 -- -D warnings"
+"doc:2"     = "doc --workspace --no-deps --locked -j 2"
+"fmt:check" = "fmt --all --check"
+"test:2"    = "test --workspace --locked -j 2"

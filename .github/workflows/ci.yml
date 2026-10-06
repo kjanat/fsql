@@ -1,7 +1,7 @@
 name: Rust CI
 
 on:
-  pull_request:
+  pull_request: null
   push: { branches: [master] }
 
 permissions: { contents: read }
@@ -21,10 +21,10 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: cargo fmt:check
       - name: Test
-        run: cargo test --workspace --locked -j 2
+        run: cargo test:2
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -j 2 -- -D warnings
+        run: cargo clippy:2
       - name: Documentation
-        run: cargo doc --workspace --no-deps --locked -j 2
+        run: cargo doc:2

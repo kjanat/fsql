@@ -1,0 +1,37 @@
+{
+	"name": "fsql-workspace",
+	"version": "0.0.0",
+	"private": true,
+	"repository": "kjanat/fsql",
+	"funding": {
+		"type": "github",
+		"url": "https://github.com/sponsors/kjanat"
+	},
+	"workspaces": [
+		"./tree-sitter-fsql",
+		"./packages/*"
+	],
+	"scripts": {
+		"grammar:check": "run @kjanat/tree-sitter-fsql:check",
+		"grammar:generate": "run @kjanat/tree-sitter-fsql:generate",
+		"grammar:test": "run @kjanat/tree-sitter-fsql:test"
+	},
+	"devDependencies": {
+		"runner-run": "catalog:",
+		"tombi": "^1.7.2"
+	},
+	"packageManager": "bun@1.4.2",
+	"devEngines": {
+		"packageManager": {
+			"name": "bun",
+			"version": ">=1.4.2"
+		}
+	},
+	"catalog": {
+		"runner-run": "^0.27.1",
+		"tree-sitter-cli": "^0.27.0"
+	},
+	"trustedDependencies": [
+		"tree-sitter-cli"
+	]
+}

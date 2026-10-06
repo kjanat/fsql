@@ -1,1 +1,6 @@
 vendor/** -text linguist-vendored
+tree-sitter-fsql/grammar/** -text linguist-vendored
+tree-sitter-fsql/src/parser.c linguist-generated
+tree-sitter-fsql/src/grammar.json linguist-generated
+tree-sitter-fsql/src/node-types.json linguist-generated
+tree-sitter-fsql/src/tree_sitter/** linguist-generated

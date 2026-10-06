@@ -1,0 +1,11 @@
+SELECT 1.5MiB, 0o755, 1_024k, '1g';
+--     ^ number
+--             ^ number
+--                    ^ number
+--                            ^ string
+SELECT path FROM files WHERE name GLOB '*.rs' AND size > 4GB;
+--                                ^ keyword.operator
+--                                     ^ string
+--                                                       ^ number
+SELECT interval '7' day;
+--                  ^ keyword

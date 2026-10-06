@@ -1,0 +1,20 @@
+-- Query files with binary and decimal byte units.
+SELECT path, human(size), mode, "group"
+FROM files('/var/log') AS f
+WHERE size >= 1.5MiB AND size < 4GB
+  AND path GLOB '**/*.log'
+  AND name REGEXP '^app' OR name MATCH 'error'
+ORDER BY size DESC NULLS LAST
+LIMIT 20 OFFSET 5;
+
+select name, size from files
+where mode & 0o111 <> 0
+  and size between 1_024k and 2g
+  and name ilike 'a%'
+  and mtime < now() - interval '30' day;
+
+select ext, count(*), sum(size), group_concat(name, ',')
+from files group by ext having count(*) > 1 order by 3 desc;
+
+select cast(mode as text), extract(year from mtime), coalesce(ext, '')
+from files where hidden is false and broken is not true;
