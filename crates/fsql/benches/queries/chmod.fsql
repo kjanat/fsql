@@ -1,0 +1,1 @@
+UPDATE files SET mode = 0o600 WHERE kind = 'file';

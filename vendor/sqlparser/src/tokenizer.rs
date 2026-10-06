@@ -51,6 +51,8 @@ use crate::{
     dialect::HiveDialect,
 };
 
+mod numeric_literals;
+
 /// SQL Token enumeration
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -292,28 +294,28 @@ impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Token::EOF => f.write_str("EOF"),
-            Token::Word(ref w) => write!(f, "{w}"),
-            Token::Number(ref n, l) => write!(f, "{}{long}", n, long = if *l { "L" } else { "" }),
-            Token::Char(ref c) => write!(f, "{c}"),
-            Token::SingleQuotedString(ref s) => write!(f, "'{s}'"),
-            Token::TripleSingleQuotedString(ref s) => write!(f, "'''{s}'''"),
-            Token::DoubleQuotedString(ref s) => write!(f, "\"{s}\""),
-            Token::TripleDoubleQuotedString(ref s) => write!(f, "\"\"\"{s}\"\"\""),
-            Token::DollarQuotedString(ref s) => write!(f, "{s}"),
-            Token::NationalStringLiteral(ref s) => write!(f, "N'{s}'"),
-            Token::QuoteDelimitedStringLiteral(ref s) => s.fmt(f),
-            Token::NationalQuoteDelimitedStringLiteral(ref s) => write!(f, "N{s}"),
-            Token::EscapedStringLiteral(ref s) => write!(f, "E'{s}'"),
-            Token::UnicodeStringLiteral(ref s) => write!(f, "U&'{s}'"),
-            Token::HexStringLiteral(ref s) => write!(f, "X'{s}'"),
-            Token::SingleQuotedByteStringLiteral(ref s) => write!(f, "B'{s}'"),
-            Token::TripleSingleQuotedByteStringLiteral(ref s) => write!(f, "B'''{s}'''"),
-            Token::DoubleQuotedByteStringLiteral(ref s) => write!(f, "B\"{s}\""),
-            Token::TripleDoubleQuotedByteStringLiteral(ref s) => write!(f, "B\"\"\"{s}\"\"\""),
-            Token::SingleQuotedRawStringLiteral(ref s) => write!(f, "R'{s}'"),
-            Token::DoubleQuotedRawStringLiteral(ref s) => write!(f, "R\"{s}\""),
-            Token::TripleSingleQuotedRawStringLiteral(ref s) => write!(f, "R'''{s}'''"),
-            Token::TripleDoubleQuotedRawStringLiteral(ref s) => write!(f, "R\"\"\"{s}\"\"\""),
+            Token::Word(w) => write!(f, "{w}"),
+            Token::Number(n, l) => write!(f, "{}{long}", n, long = if *l { "L" } else { "" }),
+            Token::Char(c) => write!(f, "{c}"),
+            Token::SingleQuotedString(s) => write!(f, "'{s}'"),
+            Token::TripleSingleQuotedString(s) => write!(f, "'''{s}'''"),
+            Token::DoubleQuotedString(s) => write!(f, "\"{s}\""),
+            Token::TripleDoubleQuotedString(s) => write!(f, "\"\"\"{s}\"\"\""),
+            Token::DollarQuotedString(s) => write!(f, "{s}"),
+            Token::NationalStringLiteral(s) => write!(f, "N'{s}'"),
+            Token::QuoteDelimitedStringLiteral(s) => s.fmt(f),
+            Token::NationalQuoteDelimitedStringLiteral(s) => write!(f, "N{s}"),
+            Token::EscapedStringLiteral(s) => write!(f, "E'{s}'"),
+            Token::UnicodeStringLiteral(s) => write!(f, "U&'{s}'"),
+            Token::HexStringLiteral(s) => write!(f, "X'{s}'"),
+            Token::SingleQuotedByteStringLiteral(s) => write!(f, "B'{s}'"),
+            Token::TripleSingleQuotedByteStringLiteral(s) => write!(f, "B'''{s}'''"),
+            Token::DoubleQuotedByteStringLiteral(s) => write!(f, "B\"{s}\""),
+            Token::TripleDoubleQuotedByteStringLiteral(s) => write!(f, "B\"\"\"{s}\"\"\""),
+            Token::SingleQuotedRawStringLiteral(s) => write!(f, "R'{s}'"),
+            Token::DoubleQuotedRawStringLiteral(s) => write!(f, "R\"{s}\""),
+            Token::TripleSingleQuotedRawStringLiteral(s) => write!(f, "R'''{s}'''"),
+            Token::TripleDoubleQuotedRawStringLiteral(s) => write!(f, "R\"\"\"{s}\"\"\""),
             Token::Comma => f.write_str(","),
             Token::Whitespace(ws) => write!(f, "{ws}"),
             Token::DoubleEq => f.write_str("=="),
@@ -382,7 +384,7 @@ impl fmt::Display for Token {
             Token::TildeEqual => f.write_str("~="),
             Token::ShiftLeftVerticalBar => f.write_str("<<|"),
             Token::VerticalBarShiftRight => f.write_str("|>>"),
-            Token::Placeholder(ref s) => write!(f, "{s}"),
+            Token::Placeholder(s) => write!(f, "{s}"),
             Token::Arrow => write!(f, "->"),
             Token::LongArrow => write!(f, "->>"),
             Token::HashArrow => write!(f, "#>"),
@@ -470,13 +472,7 @@ pub struct Word {
 
 impl fmt::Display for Word {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.quote_style {
-            Some(s) if s == '"' || s == '[' || s == '`' => {
-                write!(f, "{}{}{}", s, self.value, Word::matching_end_quote(s))
-            }
-            None => f.write_str(&self.value),
-            _ => panic!("Unexpected quote_style!"),
-        }
+        crate::ast::fmt_ident(f, &self.value, self.quote_style)
     }
 }
 
@@ -1152,7 +1148,7 @@ impl<'a> Tokenizer<'a> {
                 n @ 'N' | n @ 'n' => {
                     chars.next(); // consume, to check the next char
                     match chars.peek() {
-                        Some('\'') => {
+                        Some('\'') if self.dialect.supports_national_string_literal() => {
                             // N'...' - a <national character string literal>
                             let backslash_escape =
                                 self.dialect.supports_string_literal_backslash_escape();
@@ -1344,6 +1340,7 @@ impl<'a> Tokenizer<'a> {
                 }
                 // numbers and period
                 '0'..='9' | '.' => {
+                    let literal_start = chars.location();
                     // special case where if ._ is encountered after a word then that word
                     // is a table and the _ is the start of the col name.
                     // if the prev token is not a word, then this is not a valid sql
@@ -1360,46 +1357,46 @@ impl<'a> Tokenizer<'a> {
                         );
                     }
 
-                    // Some dialects support underscore as number separator
-                    // There can only be one at a time and it must be followed by another digit
-                    let is_number_separator = |ch: char, next_char: Option<char>| {
-                        self.dialect.supports_numeric_literal_underscores()
-                            && ch == '_'
-                            && next_char.is_some_and(|next_ch| next_ch.is_ascii_hexdigit())
-                    };
+                    // A period directly after an identifier, `)`, `]` or a tuple index
+                    // starts a field access such as `t.1`, `(1, 2).1` or `t.1.2`, never a float.
+                    if ch == '.'
+                        && self.dialect.supports_tuple_element_access()
+                        && matches!(
+                            prev_token,
+                            Some(
+                                Token::Word(_)
+                                    | Token::RParen
+                                    | Token::RBracket
+                                    | Token::Number(..)
+                            )
+                        )
+                    {
+                        chars.next();
+                        return Ok(Some(Token::Period));
+                    }
 
-                    let mut s = peeking_next_take_while(chars, |ch, next_ch| {
-                        ch.is_ascii_digit() || is_number_separator(ch, next_ch)
-                    });
+                    let mut s = self.tokenize_number_part(chars, |ch| ch.is_ascii_digit())?;
+
+                    // A tuple index is an integer, so `t.1.2` is `(t.1).2`.
+                    if !s.is_empty()
+                        && self.dialect.supports_tuple_element_access()
+                        && prev_token == Some(&Token::Period)
+                    {
+                        return Ok(Some(Token::Number(s, false)));
+                    }
 
                     // match binary literal that starts with 0x
                     if s == "0" && chars.peek() == Some(&'x') {
                         chars.next();
-                        let s2 = peeking_next_take_while(chars, |ch, next_ch| {
-                            ch.is_ascii_hexdigit() || is_number_separator(ch, next_ch)
-                        });
+                        let s2 = self.tokenize_number_part(chars, |ch| ch.is_ascii_hexdigit())?;
                         return Ok(Some(Token::HexStringLiteral(s2)));
                     }
 
                     if s == "0"
                         && self.dialect.supports_octal_prefix()
-                        && chars.peek() == Some(&'o')
+                        && matches!(chars.peek(), Some('o' | 'O'))
                     {
-                        chars.next();
-                        let digits = peeking_take_while(chars, |ch| ch.is_digit(8));
-                        if digits.is_empty() {
-                            return self.tokenizer_error(
-                                chars.location(),
-                                "Expected octal digits after 0o",
-                            );
-                        }
-                        return match u32::from_str_radix(&digits, 8) {
-                            Ok(value) => Ok(Some(Token::Number(value.to_string(), false))),
-                            Err(_) => self.tokenizer_error(
-                                chars.location(),
-                                format!("Octal literal out of range: 0o{digits}"),
-                            ),
-                        };
+                        return self.tokenize_octal_literal(chars, literal_start);
                     }
 
                     // match one period
@@ -1420,9 +1417,7 @@ impl<'a> Tokenizer<'a> {
                     }
 
                     // Consume fractional digits.
-                    s += &peeking_next_take_while(chars, |ch, next_ch| {
-                        ch.is_ascii_digit() || is_number_separator(ch, next_ch)
-                    });
+                    s += &self.tokenize_number_part(chars, |ch| ch.is_ascii_digit())?;
 
                     // No fraction -> Token::Period
                     if s == "." {
@@ -1446,12 +1441,16 @@ impl<'a> Tokenizer<'a> {
 
                         match char_clone.peek() {
                             // Definitely an exponent, get original iterator up to speed and use it
-                            Some(&c) if c.is_ascii_digit() => {
+                            Some(&c)
+                                if c.is_ascii_digit()
+                                    || (c == '_'
+                                        && self.dialect.supports_numeric_literal_underscores()) =>
+                            {
                                 for _ in 0..exponent_part.len() {
                                     chars.next();
                                 }
                                 exponent_part +=
-                                    &peeking_take_while(chars, |ch| ch.is_ascii_digit());
+                                    &self.tokenize_number_part(chars, |ch| ch.is_ascii_digit())?;
                                 s += exponent_part.as_str();
                             }
                             // Not an exponent, discard the work done
@@ -1481,16 +1480,11 @@ impl<'a> Tokenizer<'a> {
                     }
 
                     if self.dialect.supports_byte_unit_suffixes() {
-                        if let Some((suffix_len, multiplier)) = peek_byte_unit_suffix(chars) {
-                            for _ in 0..suffix_len {
-                                chars.next();
-                            }
-                            return match scale_by_byte_unit(&s, multiplier) {
+                        if let Some((suffix_len, multiplier)) = numeric_literals::peek_byte_unit_suffix(chars) {
+                            for _ in 0..suffix_len { chars.next(); }
+                            return match numeric_literals::scale_by_byte_unit(&s, multiplier) {
                                 Some(scaled) => Ok(Some(Token::Number(scaled, false))),
-                                None => self.tokenizer_error(
-                                    chars.location(),
-                                    format!("Byte size literal out of range: {s}"),
-                                ),
+                                None => self.tokenizer_error(literal_start, format!("Byte size literal out of range: {s}")),
                             };
                         }
                     }
@@ -2071,6 +2065,33 @@ impl<'a> Tokenizer<'a> {
         })
     }
 
+    fn tokenize_number_part(
+        &self,
+        chars: &mut State,
+        is_digit: impl Fn(char) -> bool,
+    ) -> Result<String, TokenizerError> {
+        let supports_separator = self.dialect.supports_numeric_literal_underscores();
+        let mut s = String::new();
+
+        while let Some(&ch) = chars.peek() {
+            if is_digit(ch) {
+                chars.next();
+                s.push(ch);
+            } else if supports_separator && ch == '_' {
+                let next_char = chars.peekable.clone().nth(1);
+                if s.is_empty() || !next_char.is_some_and(&is_digit) {
+                    return self.tokenizer_error(chars.location(), "Unexpected character '_'");
+                }
+                chars.next();
+                s.push(ch);
+            } else {
+                break;
+            }
+        }
+
+        Ok(s)
+    }
+
     // Consume characters until newline
     fn tokenize_single_line_comment(&self, chars: &mut State) -> String {
         peeking_take_while(chars, |ch| match ch {
@@ -2431,54 +2452,6 @@ impl<'a> Tokenizer<'a> {
     }
 }
 
-/// Inspect a byte-unit suffix without consuming it, returning its length and multiplier.
-fn peek_byte_unit_suffix(chars: &State) -> Option<(usize, u128)> {
-    let mut clone = chars.peekable.clone();
-    let mut suffix = String::new();
-    while let Some(&ch) = clone.peek() {
-        if ch.is_ascii_alphabetic() {
-            suffix.push(ch.to_ascii_lowercase());
-            clone.next();
-        } else {
-            break;
-        }
-    }
-    let multiplier = match suffix.as_str() {
-        "b" => 1u128,
-        "k" | "kib" => 1u128 << 10,
-        "m" | "mib" => 1u128 << 20,
-        "g" | "gib" => 1u128 << 30,
-        "t" | "tib" => 1u128 << 40,
-        "p" | "pib" => 1u128 << 50,
-        "kb" => 1_000u128,
-        "mb" => 1_000_000u128,
-        "gb" => 1_000_000_000u128,
-        "tb" => 1_000_000_000_000u128,
-        "pb" => 1_000_000_000_000_000u128,
-        _ => return None,
-    };
-    Some((suffix.len(), multiplier))
-}
-
-/// Scale a tokenized numeric literal by a byte-unit multiplier.
-fn scale_by_byte_unit(digits: &str, multiplier: u128) -> Option<String> {
-    let cleaned: String = digits.chars().filter(|ch| *ch != '_').collect();
-    if cleaned.contains('.') || cleaned.contains('e') || cleaned.contains('E') {
-        let value = cleaned.parse::<f64>().ok()?;
-        let scaled = value * multiplier as f64;
-        if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
-            return None;
-        }
-        Some((scaled.round() as u64).to_string())
-    } else {
-        let scaled = cleaned.parse::<u128>().ok()?.checked_mul(multiplier)?;
-        if scaled > u64::MAX as u128 {
-            return None;
-        }
-        Some(scaled.to_string())
-    }
-}
-
 /// Read from `chars` until `predicate` returns `false` or EOF is hit.
 /// Return the characters read as String, and keep the first non-matching
 /// char available as `chars.next()`.
@@ -2486,24 +2459,6 @@ fn peeking_take_while(chars: &mut State, mut predicate: impl FnMut(char) -> bool
     let mut s = String::new();
     while let Some(&ch) = chars.peek() {
         if predicate(ch) {
-            chars.next(); // consume
-            s.push(ch);
-        } else {
-            break;
-        }
-    }
-    s
-}
-
-/// Same as peeking_take_while, but also passes the next character to the predicate.
-fn peeking_next_take_while(
-    chars: &mut State,
-    mut predicate: impl FnMut(char, Option<char>) -> bool,
-) -> String {
-    let mut s = String::new();
-    while let Some(&ch) = chars.peek() {
-        let next_char = chars.peekable.clone().nth(1);
-        if predicate(ch, next_char) {
             chars.next(); // consume
             s.push(ch);
         } else {
@@ -2840,8 +2795,11 @@ mod tests {
         ];
         compare(expected, tokens);
 
-        all_dialects_where(|dialect| dialect.supports_numeric_literal_underscores()).tokenizes_to(
-            "SELECT 10_000, _10_000, 10_00_, 10___0, 1_000.123, 1_000.123_456",
+        let numeric_underscore_dialects =
+            all_dialects_where(|dialect| dialect.supports_numeric_literal_underscores());
+
+        numeric_underscore_dialects.tokenizes_to(
+            "SELECT 10_000, _10_000, 1_000.123, 1_000.123_456, 1e1_0",
             vec![
                 Token::make_keyword("SELECT"),
                 Token::Whitespace(Whitespace::Space),
@@ -2851,20 +2809,38 @@ mod tests {
                 Token::make_word("_10_000", None), // leading underscore tokenizes as a word (parsed as column identifier)
                 Token::Comma,
                 Token::Whitespace(Whitespace::Space),
-                Token::Number("10_00".to_string(), false),
-                Token::make_word("_", None), // trailing underscores tokenizes as a word (syntax error in some dialects)
-                Token::Comma,
-                Token::Whitespace(Whitespace::Space),
-                Token::Number("10".to_string(), false),
-                Token::make_word("___0", None), // multiple underscores tokenizes as a word (syntax error in some dialects)
-                Token::Comma,
-                Token::Whitespace(Whitespace::Space),
                 Token::Number("1_000.123".to_string(), false), // with decimal digits
                 Token::Comma,
                 Token::Whitespace(Whitespace::Space),
                 Token::Number("1_000.123_456".to_string(), false), // with an underscore in the decimal digits
+                Token::Comma,
+                Token::Whitespace(Whitespace::Space),
+                Token::Number("1e1_0".to_string(), false), // with an underscore in the exponent
             ],
         );
+
+        numeric_underscore_dialects.tokenizes_to(
+            "0xFF_FF",
+            vec![Token::HexStringLiteral("FF_FF".to_string())],
+        );
+
+        for dialect in &numeric_underscore_dialects.dialects {
+            for sql in [
+                "SELECT 10_00_",
+                "SELECT 10___0",
+                "SELECT 1_000.123_",
+                "SELECT 1._000",
+                "SELECT 1_a",
+                "SELECT 1e_1",
+                "SELECT 1e1_",
+                "SELECT 1e1__0",
+                "SELECT 0x_1",
+                "SELECT 0x1_",
+            ] {
+                let err = Tokenizer::new(&**dialect, sql).tokenize().unwrap_err();
+                assert_eq!("Unexpected character '_'", err.message);
+            }
+        }
     }
 
     #[test]
@@ -4195,15 +4171,18 @@ mod tests {
 
     #[test]
     fn test_national_strings_backslash_escape_not_supported() {
-        all_dialects_where(|dialect| !dialect.supports_string_literal_backslash_escape())
-            .tokenizes_to(
-                "select n'''''\\'",
-                vec![
-                    Token::make_keyword("select"),
-                    Token::Whitespace(Whitespace::Space),
-                    Token::NationalStringLiteral("''\\".to_string()),
-                ],
-            );
+        all_dialects_where(|dialect| {
+            !dialect.supports_string_literal_backslash_escape()
+                && dialect.supports_national_string_literal()
+        })
+        .tokenizes_to(
+            "select n'''''\\'",
+            vec![
+                Token::make_keyword("select"),
+                Token::Whitespace(Whitespace::Space),
+                Token::NationalStringLiteral("''\\".to_string()),
+            ],
+        );
     }
 
     #[test]
@@ -4614,6 +4593,107 @@ mod tests {
                 Token::Plus,
                 Token::make_word("b", None),
             ],
+        );
+    }
+
+    #[test]
+    fn test_word_display_quote_escaping() {
+        assert_eq!(
+            Word {
+                value: "a\"b".to_string(),
+                quote_style: Some('"'),
+                keyword: Keyword::NoKeyword,
+            }
+            .to_string(),
+            "\"a\"\"b\""
+        );
+        assert_eq!(
+            Word {
+                value: "a`b".to_string(),
+                quote_style: Some('`'),
+                keyword: Keyword::NoKeyword,
+            }
+            .to_string(),
+            "`a``b`"
+        );
+        assert_eq!(
+            Word {
+                value: "a b".to_string(),
+                quote_style: Some('['),
+                keyword: Keyword::NoKeyword,
+            }
+            .to_string(),
+            "[a b]"
+        );
+    }
+
+    #[test]
+    fn tokenize_period_before_digits_after_identifier_or_bracket() {
+        let dialect = ClickHouseDialect {};
+        for (sql, expected) in [
+            (
+                "t.1",
+                vec![
+                    Token::make_word("t", None),
+                    Token::Period,
+                    Token::Number("1".to_string(), false),
+                ],
+            ),
+            (
+                "(1).1",
+                vec![
+                    Token::LParen,
+                    Token::Number("1".to_string(), false),
+                    Token::RParen,
+                    Token::Period,
+                    Token::Number("1".to_string(), false),
+                ],
+            ),
+            (
+                "a[1].1",
+                vec![
+                    Token::make_word("a", None),
+                    Token::LBracket,
+                    Token::Number("1".to_string(), false),
+                    Token::RBracket,
+                    Token::Period,
+                    Token::Number("1".to_string(), false),
+                ],
+            ),
+            (
+                "t.1.2",
+                vec![
+                    Token::make_word("t", None),
+                    Token::Period,
+                    Token::Number("1".to_string(), false),
+                    Token::Period,
+                    Token::Number("2".to_string(), false),
+                ],
+            ),
+            (
+                "t .1",
+                vec![
+                    Token::make_word("t", None),
+                    Token::Whitespace(Whitespace::Space),
+                    Token::Number(".1".to_string(), false),
+                ],
+            ),
+            ("1.5", vec![Token::Number("1.5".to_string(), false)]),
+            (".5", vec![Token::Number(".5".to_string(), false)]),
+        ] {
+            let tokens = Tokenizer::new(&dialect, sql).tokenize().unwrap();
+            compare(expected, tokens);
+        }
+
+        let tokens = Tokenizer::new(&GenericDialect {}, "t.1")
+            .tokenize()
+            .unwrap();
+        compare(
+            vec![
+                Token::make_word("t", None),
+                Token::Number(".1".to_string(), false),
+            ],
+            tokens,
         );
     }
 }

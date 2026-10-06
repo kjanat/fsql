@@ -1,9 +1,7 @@
-import { complete, hover } from '#language';
 import { expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { TextDocument } from 'vscode-languageserver-textdocument';
 import {
 	CompletionRequest,
 	createProtocolConnection,
@@ -18,6 +16,8 @@ import {
 	StreamMessageReader,
 	StreamMessageWriter,
 } from 'vscode-languageserver/node';
+import { TextDocument } from 'vscode-languageserver-textdocument';
+import { complete, hover } from '#language';
 
 function completions(text: string, offset = text.length) {
 	const doc = TextDocument.create('file:///test.fsql', 'fsql', 1, text);
@@ -65,10 +65,39 @@ test('no suggestions inside comments or quoted text, including unfinished tokens
 });
 
 test.each([
-	[process.execPath, '../src/server.ts'],
-	['node', '../dist/node/server.mjs'],
-])('stdio lifecycle with %s %s', async (runtime, entry) => {
-	const child = spawn(runtime, [fileURLToPath(new URL(entry, import.meta.url)), '--stdio'], {
+	"SELECT 'it''s', si",
+	'SELECT "a""b", si',
+	'SELECT `a``b`, si',
+	'/* outer /* inner */ still outer */ SELECT si',
+	'SELECT $$inside -- comment$$, si',
+	'SELECT $tag$inside /* comment */$tag$, si',
+	'-- comment\r\nSELECT si',
+])('completion resumes after closed comments and quoted text: %s', text => {
+	const doc = TextDocument.create('file:///test.fsql', 'fsql', 1, text);
+	const size = complete(doc, doc.positionAt(text.length)).find(item => item.label === 'size');
+	expect(size?.textEdit).toEqual({
+		range: { start: doc.positionAt(text.length - 2), end: doc.positionAt(text.length) },
+		newText: 'size',
+	});
+});
+
+test.each([
+	[process.execPath, '../src/server.ts', []],
+	['node', '../src/server.ts', []],
+	['node', '../dist/node/server.mjs', []],
+	...(Bun.which('deno')
+		? [
+			['deno', '../src/server.ts', [
+				'run',
+				'--allow-env',
+				'--allow-read',
+				'--node-modules-dir=manual',
+				'--no-lock',
+			]] as const,
+		]
+		: []),
+])('stdio lifecycle with %s %s', async (runtime, entry, args) => {
+	const child = spawn(runtime, [...args, fileURLToPath(new URL(entry, import.meta.url)), '--stdio'], {
 		stdio: 'pipe',
 	});
 	const exited = once(child, 'exit');

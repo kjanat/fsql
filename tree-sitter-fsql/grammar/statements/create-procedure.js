@@ -1,3 +1,4 @@
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   create_procedure: $ => seq(

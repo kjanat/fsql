@@ -1,0 +1,12 @@
+-- Equal nonzero sizes are candidates for inspection, not proof of equal content.
+WITH candidates AS (
+    SELECT path, size FROM files WHERE kind = 'file' AND size > 0
+), repeated AS (
+    SELECT size, count(*) AS matching_files
+    FROM candidates
+    GROUP BY size
+    HAVING count(*) > 1
+)
+SELECT candidates.path, size, human(size) AS readable_size, matching_files
+FROM candidates JOIN repeated USING (size)
+ORDER BY size DESC, candidates.path;

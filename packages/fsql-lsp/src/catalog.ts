@@ -65,7 +65,9 @@ export const catalog: CompletionItem[] = [
 		label,
 		kind: CompletionItemKind.Field,
 		detail: 'fsql column',
-		documentation: `Column of ${Object.keys(tables).filter(table => tables[table]!.includes(label)).join(', ')}.`,
+		documentation: `Column of ${
+			Object.entries(tables).filter(([, columns]) => columns.includes(label)).map(([table]) => table).join(', ')
+		}.`,
 	})),
 	...Object.entries(functions).map(([label, documentation]) => ({
 		label,

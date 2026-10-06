@@ -1,0 +1,11 @@
+-- Run with --apply inside .cargo/sandbox.toml; every run starts with an empty tree.
+INSERT INTO files (path, content)
+VALUES ('/tmp/fsql-sandbox/note.txt', 'hello from fsql');
+
+UPDATE files SET name = 'renamed.txt' WHERE name = 'note.txt';
+
+SELECT name, size FROM files WHERE kind = 'file';
+
+DELETE FROM files WHERE name = 'renamed.txt';
+
+SELECT count(*) AS remaining_files FROM files WHERE kind = 'file';

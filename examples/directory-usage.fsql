@@ -1,0 +1,20 @@
+-- Roll each regular file's apparent bytes up to every ancestor within the root.
+-- Hard links count once per directory entry; this does not measure disk blocks.
+WITH RECURSIVE entries AS (
+    SELECT path, parent, depth, kind, size FROM files
+), contributions(path, bytes) AS (
+    SELECT parent, size FROM entries WHERE kind = 'file'
+    UNION ALL
+    SELECT entries.parent, contributions.bytes
+    FROM contributions JOIN entries USING (path)
+    WHERE entries.depth > 0
+)
+SELECT
+    path AS directory,
+    count(*) AS file_count,
+    sum(bytes) AS total_bytes,
+    human(sum(bytes)) AS readable_size
+FROM contributions
+GROUP BY path
+ORDER BY total_bytes DESC, directory
+LIMIT 20;

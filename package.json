@@ -15,12 +15,16 @@
 		"grammar:check": "run @kjanat/tree-sitter-fsql:check",
 		"grammar:generate": "run @kjanat/tree-sitter-fsql:generate",
 		"grammar:test": "run @kjanat/tree-sitter-fsql:test",
+		"grammar:typecheck": "run @kjanat/tree-sitter-fsql:typecheck",
 		"lsp:build": "run @kjanat/fsql-lsp:build",
 		"lsp:check": "run @kjanat/fsql-lsp:check",
 		"lsp:start": "run @kjanat/fsql-lsp:start",
-		"lsp:test": "run @kjanat/fsql-lsp:test"
+		"lsp:test": "run @kjanat/fsql-lsp:test",
+		"sandbox:check": "python3 scripts/check-sandbox.py"
 	},
 	"devDependencies": {
+		"biome": "catalog:",
+		"importmapify": "catalog:",
 		"runner-run": "catalog:",
 		"tombi": "catalog:",
 		"typescript": "catalog:"
@@ -33,12 +37,15 @@
 		}
 	},
 	"catalog": {
-		"runner-run": "^0.27.1",
-		"tree-sitter-cli": "^0.27.0",
 		"@types/bun": "^1.4.2",
+		"biome": "npm:@biomejs/biome@^2.5.15",
+		"importmapify": "^1.7.0",
+		"runner-run": "^0.27.1",
 		"tombi": "^1.7.3",
-		"typescript": "^7.0.2",
-		"tsdown": "^0.23.0"
+		"tree-sitter": "^0.25.1",
+		"tree-sitter-cli": "^0.27.0",
+		"tsdown": "^0.23.0",
+		"typescript": "^7.0.2"
 	},
 	"trustedDependencies": [
 		"tree-sitter-cli"

@@ -1,0 +1,8 @@
+-- Inspect recent regular files writable by others through their mode bits.
+-- ACLs and mount options can further affect effective access.
+SELECT path, perms, mtime, human(size) AS readable_size, size
+FROM files
+WHERE kind = 'file'
+  AND mode & 0o002 <> 0
+  AND mtime >= now() - INTERVAL '7' DAY
+ORDER BY mtime DESC, path;

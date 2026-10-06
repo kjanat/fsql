@@ -5,6 +5,9 @@
 	"description": "Tree-sitter grammar for fsql query files",
 	"license": "MIT",
 	"type": "module",
+	"imports": {
+		"#grammar/*": "./grammar/*.js"
+	},
 	"exports": {
 		"./package.json": "./package.json",
 		"./tree-sitter.json": "./tree-sitter.json",
@@ -23,9 +26,14 @@
 	"scripts": {
 		"check": "node scripts/check-examples.mjs",
 		"generate": "tree-sitter generate",
-		"test": "tree-sitter test"
+		"test": "tree-sitter test",
+		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
-		"tree-sitter-cli": "catalog:"
+		"@types/bun": "catalog:",
+		"biome": "catalog:",
+		"tree-sitter": "catalog:",
+		"tree-sitter-cli": "catalog:",
+		"typescript": "catalog:"
 	}
 }

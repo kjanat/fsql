@@ -1,7 +1,8 @@
+import type { Connection } from 'vscode-languageserver';
+import { TextDocumentSyncKind, TextDocuments } from 'vscode-languageserver';
+import { TextDocument } from 'vscode-languageserver-textdocument';
 import { complete, hover } from '#language';
 import pkg from '#pkg' with { type: 'json' };
-import { type Connection, TextDocuments, TextDocumentSyncKind } from 'vscode-languageserver';
-import { TextDocument } from 'vscode-languageserver-textdocument';
 
 export function startServer(connection: Connection): void {
 	const documents = new TextDocuments(TextDocument);

@@ -26,6 +26,10 @@ struct Cli {
     #[arg(value_name = "FILE")]
     file: Option<PathBuf>,
 
+    /// Load SQL from a file, or `-` for stdin
+    #[arg(short = 'F', long, value_name = "FILE", conflicts_with = "file")]
+    from_file: Option<PathBuf>,
+
     /// Directory the `files` table starts from
     #[arg(short = 'C', long, value_name = "DIR")]
     root: Option<PathBuf>,
@@ -180,7 +184,7 @@ fn run(cli: Cli) -> Result<ExitCode, Error> {
         },
     );
     let mut scripts: Vec<String> = cli.execute.clone();
-    match &cli.file {
+    match cli.from_file.as_ref().or(cli.file.as_ref()) {
         Some(path) if path.as_os_str() == "-" => scripts.push(read_stdin()?),
         Some(path) => scripts.push(std::fs::read_to_string(path).map_err(|source| Error::Io {
             path: path.clone(),

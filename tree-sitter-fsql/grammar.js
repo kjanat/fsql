@@ -1,11 +1,21 @@
-import column_list_rules from './grammar/column-lists.js';
-import expression_rules from './grammar/expressions.js';
-import { make_keyword, optional_parenthesis } from './grammar/helpers.js';
-import keyword_rules from './grammar/keywords.js';
-import statement_rules from './grammar/statements/index.js';
-import select_rules from './grammar/statements/select.js';
-import transaction_rules from './grammar/transactions.js';
-import type_rules from './grammar/types.js';
+/**
+ * @file Permissive Tree-sitter grammar for fsql query files.
+ * @author Kaj Kowalski <info@kajkowalski.nl>
+ * @license MIT
+ *
+ * Adapted from Derek Stride (@DerekStride)'s tree-sitter-sql; see UPSTREAM.md.
+ * The Rust planner and evaluator define which queries fsql can execute.
+ */
+/// <reference types="tree-sitter-cli/dsl" resolution-mode="require" />
+
+import column_list_rules from '#grammar/column-lists';
+import expression_rules from '#grammar/expressions';
+import { make_keyword, optional_parenthesis } from '#grammar/helpers';
+import keyword_rules from '#grammar/keywords';
+import statement_rules from '#grammar/statements/index';
+import select_rules from '#grammar/statements/select';
+import transaction_rules from '#grammar/transactions';
+import type_rules from '#grammar/types';
 
 export default grammar({
 	name: 'fsql',
@@ -30,7 +40,7 @@ export default grammar({
 		[$.between_expression, $.binary_expression],
 	],
 
-	precedences: $ => [
+	precedences: () => [
 		[
 			'binary_is',
 			'unary_not',
@@ -58,9 +68,9 @@ export default grammar({
 				optional($.statement),
 			),
 
-		comment: _ => /--.*/,
+		comment: () => /--.*/,
 		// https://stackoverflow.com/questions/13014947/regex-to-match-a-c-style-multiline-comment
-		marginalia: _ => /\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\//,
+		marginalia: () => /\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\//,
 
 		...keyword_rules,
 		...type_rules,
@@ -71,8 +81,8 @@ export default grammar({
 
 		// fsql additions. This intentionally remains a permissive SQL grammar;
 		// execution support and mutation safety are checked by the Rust planner.
-		keyword_glob: _ => token(prec(1, make_keyword('glob'))),
-		keyword_xor: _ => token(prec(1, make_keyword('xor'))),
+		keyword_glob: () => token(prec(1, make_keyword('glob'))),
+		keyword_xor: () => token(prec(1, make_keyword('xor'))),
 
 		// Keep the upstream expression precedence, including the new byte token.
 		literal: $ =>
@@ -149,7 +159,7 @@ export default grammar({
 			),
 		_update_statement: $ => seq($.update, optional($.order_by), optional($.limit), optional($.returning)),
 		_insert_values: $ => prec(1, statement_rules._insert_values($)),
-		_byte_size: _ =>
+		_byte_size: () =>
 			seq(
 				optional(choice('-', '+')),
 				token(
@@ -187,7 +197,7 @@ export default grammar({
 				$._literal_string,
 				optional(seq($.interval_unit, optional(seq($.keyword_to, $.interval_unit)))),
 			)),
-		interval_unit: _ =>
+		interval_unit: () =>
 			token(prec(
 				1,
 				choice(...[

@@ -1,3 +1,4 @@
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
   _refresh_statement: ($) => $.refresh_materialized_view,
 

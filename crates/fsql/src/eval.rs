@@ -178,14 +178,14 @@ impl Evaluator {
                 pattern,
                 escape_char,
                 ..
-            } => self.like(expr, pattern, escape_char.as_ref(), false, *negated, row),
+            } => self.like(expr, pattern, escape_char.as_deref(), false, *negated, row),
             Expr::ILike {
                 negated,
                 expr,
                 pattern,
                 escape_char,
                 ..
-            } => self.like(expr, pattern, escape_char.as_ref(), true, *negated, row),
+            } => self.like(expr, pattern, escape_char.as_deref(), true, *negated, row),
             Expr::Interval(interval) => self.interval(interval, row),
             Expr::Function(function) => self.function(function, row),
             Expr::Cast {
@@ -404,7 +404,7 @@ impl Evaluator {
         &mut self,
         expr: &Expr,
         pattern: &Expr,
-        escape: Option<&ValueWithSpan>,
+        escape: Option<&Expr>,
         fold: bool,
         negated: bool,
         row: &dyn Row,
@@ -414,11 +414,12 @@ impl Evaluator {
         if subject.is_null() || pattern.is_null() {
             return Ok(Value::Null);
         }
-        let escape = match escape.map(|e| &e.value) {
+        let escape = match escape {
             None => None,
-            Some(Literal::SingleQuotedString(s)) | Some(Literal::DoubleQuotedString(s)) => {
-                s.chars().next()
-            }
+            Some(Expr::Value(ValueWithSpan {
+                value: Literal::SingleQuotedString(s) | Literal::DoubleQuotedString(s),
+                ..
+            })) => s.chars().next(),
             Some(other) => {
                 return Err(Error::Unsupported(format!("escape `{other}`")));
             }

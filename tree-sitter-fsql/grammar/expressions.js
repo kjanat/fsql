@@ -1,5 +1,6 @@
-import { optional_parenthesis, paren_list, wrapped_in_parenthesis } from "./helpers.js";
+import { optional_parenthesis, paren_list, wrapped_in_parenthesis } from "#grammar/helpers";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _expression: $ => prec(1,
@@ -57,7 +58,7 @@ export default {
       field('name', $.identifier),
     ),
 
-  parameter: $ => /\?|(\$[0-9]+)/,
+  parameter: () => /\?|(\$[0-9]+)/,
 
   case: $ => seq(
     $.keyword_case,
@@ -196,7 +197,7 @@ export default {
     ),
   ),
 
-  op_other: $ => token(
+  op_other: () => token(
     choice(
       '->',
       '->>',
@@ -243,7 +244,7 @@ export default {
   ),
 
   binary_expression: $ => choice(
-    ...[
+    .../** @satisfies {[RuleOrLiteral, PrecedenceValue][]} */ ([
       ['+', 'binary_plus'],
       ['-', 'binary_plus'],
       ['*', 'binary_times'],
@@ -270,27 +271,27 @@ export default {
       // `is (not distinct from)` with a unary `not`
       [$.distinct_from, 'binary_is'],
       [$.not_distinct_from, 'binary_is'],
-    ].map(([operator, precedence]) =>
+    ]).map(([operator, precedence]) =>
       prec.left(precedence, seq(
         field('left', $._expression),
         field('operator', operator),
         field('right', $._expression)
       ))
     ),
-    ...[
+    .../** @satisfies {[RuleOrLiteral, PrecedenceValue][]} */ ([
       [$.keyword_and, 'clause_connective'],
       [$.keyword_or, 'clause_disjunctive'],
-    ].map(([operator, precedence]) =>
+    ]).map(([operator, precedence]) =>
       prec.left(precedence, seq(
         field('left', $._expression),
         field('operator', operator),
         field('right', $._expression)
       ))
     ),
-    ...[
+    .../** @satisfies {[RuleOrLiteral, PrecedenceValue][]} */ ([
       [$.keyword_in, 'binary_in'],
       [$.not_in, 'binary_in'],
-    ].map(([operator, precedence]) =>
+    ]).map(([operator, precedence]) =>
       prec.left(precedence, seq(
         field('left', $._expression),
         field('operator', operator),
@@ -299,7 +300,7 @@ export default {
     ),
   ),
 
-  op_unary_other: $ => token(
+  op_unary_other: () => token(
     choice(
       '|/',
       '||/',
@@ -315,14 +316,14 @@ export default {
   ),
 
   unary_expression: $ => choice(
-    ...[
+    .../** @satisfies {[RuleOrLiteral, PrecedenceValue][]} */ ([
       [$.keyword_not, 'unary_not'],
       [$.bang, 'unary_not'],
       [$.keyword_any, 'unary_not'],
       [$.keyword_some, 'unary_not'],
       [$.keyword_all, 'unary_not'],
       [$.op_unary_other, 'unary_other'],
-    ].map(([operator, precedence]) =>
+    ]).map(([operator, precedence]) =>
       prec.left(precedence, seq(
         field('operator', operator),
         field('operand', $._expression)
@@ -337,10 +338,10 @@ export default {
   ),
 
   between_expression: $ => choice(
-    ...[
+    .../** @satisfies {[RuleOrLiteral, PrecedenceValue][]} */ ([
           [$.keyword_between, 'between'],
           [seq($.keyword_not, $.keyword_between), 'between'],
-      ].map(([operator, precedence]) =>
+      ]).map(([operator, precedence]) =>
               prec.left(precedence, seq(
               field('left', $._expression),
               field('operator', operator),
@@ -374,13 +375,12 @@ export default {
       $.keyword_null,
     ),
   ),
-  _double_quote_string: _ => /"[^"]*"/,
-  _backtick_quoted_string: _ => /`[^`]*`/,
-  // The norm specify that between two consecutive string must be a return,
-  // but this is good enough.
-  _single_quote_string: _ => seq(/([uU]&|[nN])?'([^']|'')*'/, repeat(/'([^']|'')*'/)),
+  _double_quote_string: () => /"[^"]*"/,
+  _backtick_quoted_string: () => /`[^`]*`/,
+  // The norm specify that between two consecutive string must be a return, but this is good enough.
+  _single_quote_string: () => seq(/([uU]&|[nN])?'([^']|'')*'/, repeat(/'([^']|'')*'/)),
 
-  _postgres_escape_string: _ => /(e|E)'([^']|\\')*'/,
+  _postgres_escape_string: () => /(e|E)'([^']|\\')*'/,
 
   _literal_string: $ => prec(
     1,
@@ -391,21 +391,21 @@ export default {
       $._postgres_escape_string,
     ),
   ),
-  _natural_number: _ => /\d+/,
-  _integer: $ => seq(
+  _natural_number: () => /\d+/,
+  _integer: () => seq(
     optional(choice("-", "+")),
     /(0[xX][0-9A-Fa-f]+(_[0-9A-Fa-f]+)*)|(0[oO][0-7]+(_[0-7]+)*)|(0[bB][01]+(_[01]+)*)|(\d+(_\d+)*(e[+-]?\d+(_\d+)*)?)/
   ),
-  _decimal_number: $ => seq(
+  _decimal_number: () => seq(
     optional(
       choice("-", "+")),
     /((\d+(_\d+)*)?[.]\d+(_\d+)*(e[+-]?\d+(_\d+)*)?)|(\d+(_\d+)*[.](e[+-]?\d+(_\d+)*)?)/
   ),
-  _bit_string: $ => seq(/[bBxX]'([^']|'')*'/, repeat(/'([^']|'')*'/)),
+  _bit_string: () => seq(/[bBxX]'([^']|'')*'/, repeat(/'([^']|'')*'/)),
   // The identifier should be followed by a string (no parenthesis allowed)
   _string_casting: $ => seq($.identifier, $._single_quote_string),
 
-  bang: _ => '!',
+  bang: () => '!',
 
   identifier: $ => choice(
     $._identifier,
@@ -416,7 +416,7 @@ export default {
   ),
   _tsql_parameter: $ => seq('@', $._identifier),
   // support nordic chars and umlaue
-  _identifier: _ => /[A-Za-z_\u00C0-\u017F][0-9A-Za-z_\u00C0-\u017F]*/,
+  _identifier: () => /[A-Za-z_\u00C0-\u017F][0-9A-Za-z_\u00C0-\u017F]*/,
 
   object_id: $ => seq(
     $.keyword_object_id,

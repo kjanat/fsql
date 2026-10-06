@@ -1,3 +1,4 @@
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   transaction: $ => seq(

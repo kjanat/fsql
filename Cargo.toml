@@ -4,21 +4,22 @@ members  = ["crates/*", "editors/zed/"]
 exclude  = ["vendor"]
 
 [workspace.package]
-edition      = "2024"
-rust-version = "1.99"
-repository   = "https://github.com/kjanat/fsql"
-license      = "MIT"
+edition    = "2024"
+repository = "https://github.com/kjanat/fsql"
+license    = "MIT"
 
 [workspace.dependencies]
 fsql      = { path = "crates/fsql" }
 sqlparser = { path = "vendor/sqlparser" }
 
 clap       = { version = "4.6.6", features = ["derive"] }
+criterion  = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 globset    = "0.4.20"
 regex      = "1.13.1"
 rustix     = { version = "1.1.4", features = ["fs", "process"] }
 serde      = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+tempfile   = "3.27.0"
 uzers      = "0.12.2"
 
 [workspace.dependencies.tree-fucker]

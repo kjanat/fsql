@@ -23,8 +23,8 @@ use std::collections::HashSet;
 use syn::{
     braced,
     parse::{Parse, ParseStream},
-    Error, File, FnArg, Ident, Item, LitBool, LitChar, Pat, ReturnType, Signature, Token,
-    TraitItem, Type,
+    Error, File, FnArg, Ident, Item, LitBool, LitChar, Pat, ReceiverKind, ReturnType, Signature,
+    Token, TraitItem, Type,
 };
 
 /// Override value types supported by the macro
@@ -292,7 +292,7 @@ fn read_dialect_mod_file() -> Result<String, String> {
                     name.starts_with("sqlparser-") && !name.starts_with("sqlparser-derive")
                 })
                 .collect();
-            siblings.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            siblings.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
             candidates.extend(
                 siblings
                     .into_iter()
@@ -343,7 +343,7 @@ fn is_bool_method(sig: &Signature) -> bool {
     sig.inputs.len() == 1
         && matches!(
             sig.inputs.first(),
-            Some(FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none()
+            Some(FnArg::Receiver(r)) if matches!(&r.kind, ReceiverKind::Reference(_, _, None))
         )
         && matches!(
             &sig.output,

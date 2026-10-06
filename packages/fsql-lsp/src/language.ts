@@ -1,6 +1,6 @@
-import { catalog, tables } from '#catalog';
 import type { CompletionItem, Hover, Position } from 'vscode-languageserver';
-import { TextDocument } from 'vscode-languageserver-textdocument';
+import type { TextDocument } from 'vscode-languageserver-textdocument';
+import { catalog, tables } from '#catalog';
 
 interface Token {
 	text: string;
@@ -10,12 +10,38 @@ interface Token {
 	closed: boolean;
 }
 
+function scanBlockComment(text: string, start: number): Pick<Token, 'end' | 'closed'> {
+	let end = start + 2;
+	let depth = 1;
+	while (end < text.length && depth) {
+		if (text.startsWith('/*', end)) {
+			depth++;
+			end += 2;
+		} else if (text.startsWith('*/', end)) {
+			depth--;
+			end += 2;
+		} else end++;
+	}
+	return { end, closed: depth === 0 };
+}
+
+function scanQuotedText(text: string, start: number): Pick<Token, 'end' | 'closed'> {
+	const quote = text.charAt(start);
+	let end = start + 1;
+	while (end < text.length) {
+		if (text.charAt(end++) !== quote) continue;
+		if (text.charAt(end) === quote) end++;
+		else return { end, closed: true };
+	}
+	return { end, closed: false };
+}
+
 // A lexical helper, not a SQL validator. Offsets are UTF-16, as required by LSP.
 function tokens(text: string): Token[] {
 	const result: Token[] = [];
 	let i = 0;
 	while (i < text.length) {
-		if (/\s/.test(text[i]!)) {
+		if (/\s/.test(text.charAt(i))) {
 			i++;
 			continue;
 		}
@@ -25,40 +51,23 @@ function tokens(text: string): Token[] {
 		const dollar = /^\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$/.exec(text.slice(i))?.[0];
 		if (text.startsWith('--', i)) {
 			opaque = true;
-			while (i < text.length && !/[\r\n]/.test(text[i]!)) i++;
+			while (i < text.length && !/[\r\n]/.test(text.charAt(i))) i++;
 			closed = false;
 		} else if (text.startsWith('/*', i)) {
 			opaque = true;
-			i += 2;
-			let depth = 1;
-			while (i < text.length && depth) {
-				if (text.startsWith('/*', i)) {
-					depth++;
-					i += 2;
-				} else if (text.startsWith('*/', i)) {
-					depth--;
-					i += 2;
-				} else i++;
-			}
-			closed = depth === 0;
+			const comment = scanBlockComment(text, i);
+			i = comment.end;
+			closed = comment.closed;
 		} else if (dollar) {
 			opaque = true;
 			const end = text.indexOf(dollar, i + dollar.length);
 			closed = end !== -1;
 			i = closed ? end + dollar.length : text.length;
-		} else if (/['"`]/.test(text[i]!)) {
+		} else if (/['"`]/.test(text.charAt(i))) {
 			opaque = true;
-			closed = false;
-			const quote = text[i++];
-			while (i < text.length) {
-				if (text[i++] === quote) {
-					if (text[i] === quote) i++;
-					else {
-						closed = true;
-						break;
-					}
-				}
-			}
+			const quoted = scanQuotedText(text, i);
+			i = quoted.end;
+			closed = quoted.closed;
 		} else {
 			const word = /^[A-Za-z_][A-Za-z_0-9]*/.exec(text.slice(i));
 			i += word?.[0].length ?? 1;
@@ -77,11 +86,12 @@ export function complete(document: TextDocument, position: Position): Completion
 	const before = all.filter(t => !t.opaque && t.end <= (current?.start ?? offset));
 	const last = before.at(-1)?.text.toLowerCase();
 	const qualifier = before.at(-2)?.text.toLowerCase();
+	const columns = qualifier && Object.hasOwn(tables, qualifier) ? tables[qualifier] : undefined;
 	let items = catalog;
 	if (last && ['from', 'join', 'update', 'into'].includes(last)) {
 		items = items.filter(item => Object.hasOwn(tables, item.label));
-	} else if (last === '.' && qualifier && Object.hasOwn(tables, qualifier)) {
-		items = items.filter(item => item.detail === 'fsql column' && tables[qualifier]!.includes(item.label));
+	} else if (last === '.' && columns) {
+		items = items.filter(item => item.detail === 'fsql column' && columns.includes(item.label));
 	}
 	return items.filter(item => item.label.toLowerCase().startsWith(prefix)).map(item => ({
 		...item,

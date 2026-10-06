@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { startServer } from '#connection';
 import { createConnection } from 'vscode-languageserver/node';
+import { startServer } from '#connection';
 
 startServer(createConnection(
 	process.stdin,

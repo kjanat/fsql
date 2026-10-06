@@ -1,5 +1,6 @@
-import { comma_list } from "../helpers.js";
+import { comma_list } from "#grammar/helpers";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _update_statement: $ => seq(

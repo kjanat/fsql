@@ -17,17 +17,43 @@
 	"prettier": { "allowed": false },
 	"languages": {
 		"TypeScript": {
-			"language_servers": ["typescript"] // https://github.com/kjanat/zed-typescript
+			"format_on_save": "on",
+			"formatter": { "external": { "command": "dprint", "arguments": ["fmt", "--stdin", "{buffer_path}"] } },
+			"code_actions_on_format": {
+				"source.fixAll.biome": true,
+				"source.organizeImports.biome": true
+			},
+			"language_servers": ["typescript", "biome"] // https://github.com/kjanat/zed-typescript
 		},
 		"JavaScript": {
-			"language_servers": ["typescript"] // https://github.com/kjanat/zed-typescript
+			"format_on_save": "on",
+			"formatter": { "external": { "command": "dprint", "arguments": ["fmt", "--stdin", "{buffer_path}"] } },
+			"code_actions_on_format": {
+				"source.fixAll.biome": true,
+				"source.organizeImports.biome": true
+			},
+			"language_servers": ["typescript", "biome"] // https://github.com/kjanat/zed-typescript
+		},
+		"Markdown": {
+			"language_servers": ["!markdownlint", "rumdl", "..."]
 		}
 	},
 	"lsp": {
 		"fsql": {
 			"binary": {
 				"path": "bun",
-				"arguments": ["--bun", "packages/fsql-lsp/src/server.ts", "--stdio"]
+				"arguments": ["--bun", "--watch", "./packages/fsql-lsp/src/server.ts", "--stdio"]
+			}
+		},
+		"biome": {
+			"settings": {
+				"config_path": "./biome.jsonc",
+				"require_config_file": true,
+				"goto_definition": true,
+				"inline_config": {
+					"formatter": { "enabled": false },
+					"linter": {}
+				}
 			}
 		},
 		"json-language-server": {

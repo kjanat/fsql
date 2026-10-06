@@ -1,7 +1,23 @@
-#:schema https://www.schemastore.org/cargo-config.json
+#:schema https://raw.githubusercontent.com/kjanat/cargo-config-schema/refs/heads/master/cargo-config.json
 
 [alias]
-"clippy:2"  = "clippy --workspace --all-targets --locked -j 2 -- -D warnings"
-"doc:2"     = "doc --workspace --no-deps --locked -j 2"
-"fmt:check" = "fmt --all --check"
-"test:2"    = "test --workspace --locked -j 2"
+rr = ["run", "--release"]
+
+"build:zed"      = ["build", "--package", "fsql-zed", "--target", "wasm32-wasip2", "--locked"]
+"check:doc"      = ["doc", "--workspace", "--no-deps", "--locked"]
+"check:fmt"      = ["fmt", "--all", "--check"]
+"lint:workspace" = ["clippy", "--workspace", "--all-targets", "--locked"]
+"test:workspace" = ["test", "--workspace", "--locked"]
+
+fsql         = ["rr", "--bin", "fsql", "--package", "fsql-cli", "--"]
+fsql-install = ["install", "--path=crates/fsql-cli", "--bin=fsql"]
+
+"bench:engine"   = ["bench", "--package", "fsql", "--bench", "engine", "--locked", "--"]
+"example:query"  = ["run", "--package", "fsql", "--example", "query", "--locked", "--"]
+"example:stream" = ["run", "--package", "fsql", "--example", "stream", "--locked", "--"]
+"example:undo"   = ["run", "--package", "fsql", "--example", "mutate_and_undo", "--locked", "--"]
+"sandbox:fsql"   = ["run", "--config", ".cargo/sandbox.toml", "--package", "fsql-cli", "--locked", "--"]
+"sandbox:test"   = ["test", "--config", ".cargo/sandbox.toml", "--package", "fsql", "--test", "contracts", "--locked"]
+
+[env]
+RUSTFLAGS = { value = "-Znightly -D warnings", force = true }

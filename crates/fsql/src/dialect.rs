@@ -116,6 +116,21 @@ mod tests {
     }
 
     #[test]
+    fn extended_numbers_parse_without_losing_precision_or_creating_aliases() {
+        assert_eq!(
+            selection("select path from files where size > 9007199254740993.0b"),
+            "size > 9007199254740993"
+        );
+        assert_eq!(
+            selection("select path from files where mode = 0O7_55"),
+            "mode = 493"
+        );
+        for literal in ["0o7__55", "0o755suffix", "0o758", "18446744073709551616.0b"] {
+            assert!(Parser::parse_sql(&FsqlDialect, &format!("select {literal}")).is_err());
+        }
+    }
+
+    #[test]
     fn glob_binds_tighter_than_and() {
         assert_eq!(
             selection("select path from files where path glob '*.tmp' and size > 1k"),

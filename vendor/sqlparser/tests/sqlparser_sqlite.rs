@@ -926,6 +926,104 @@ fn test_drop_trigger() {
     }
 }
 
+#[test]
+fn parse_pattern_operators_bind_at_like_precedence() {
+    fn where_operator(sql: &str) -> BinaryOperator {
+        let Statement::Query(query) = sqlite().verified_stmt(sql) else {
+            panic!("expected a query");
+        };
+        let SetExpr::Select(select) = *query.body else {
+            panic!("expected a select");
+        };
+        let Some(Expr::BinaryOp { op, .. }) = select.selection else {
+            panic!("expected a WHERE binary operator");
+        };
+        op
+    }
+
+    // Above AND, so the pattern does not swallow the rest of the expression.
+    for operator in ["REGEXP", "MATCH", "GLOB", "LIKE"] {
+        let sql = format!("SELECT 1 FROM t WHERE a {operator} 'p' AND b = 1");
+        assert_eq!(where_operator(&sql), BinaryOperator::And, "{operator}");
+    }
+    // Below string concatenation, so the pattern is not cut short either.
+    for (operator, expected) in [
+        ("REGEXP", BinaryOperator::Regexp),
+        ("MATCH", BinaryOperator::Match),
+        ("GLOB", BinaryOperator::Glob),
+    ] {
+        let sql = format!("SELECT 1 FROM t WHERE a {operator} 'p' || 'q'");
+        assert_eq!(where_operator(&sql), expected, "{operator}");
+    }
+}
+
+#[test]
+fn parse_update_set_double_eq() {
+    // SQLite treats `==` as `=` in all positions, including SET assignments.
+    sqlite().one_statement_parses_to("UPDATE t SET a == 1", "UPDATE t SET a = 1");
+    sqlite().one_statement_parses_to("UPDATE t SET a == 1, b == 2", "UPDATE t SET a = 1, b = 2");
+    // `=` still works
+    sqlite().verified_stmt("UPDATE t SET a = 1");
+    // Other dialects reject `==` in SET
+    let res = ParserError::ParserError("Expected: =, found: ==".to_string());
+    assert_eq!(
+        all_dialects_except(|d| d.supports_double_eq_assignment())
+            .parse_sql_statements("UPDATE t SET a == 1")
+            .unwrap_err(),
+        res,
+    );
+}
+
+#[test]
+fn test_non_bmp_identifiers() {
+    // SQLite tokenizer treats every byte >= 0x80 as an identifier character,
+    // so any Unicode code point above U+007F is a valid identifier start/part.
+    sqlite().verified_stmt("SELECT 󟿾");
+    sqlite().verified_stmt("SELECT 𒀀");
+    sqlite().verified_stmt("SELECT 𒀀𒀁");
+    // U+DFFFE is not alphabetic, so GenericDialect rejects it as an identifier.
+    assert!(sqlparser::parser::Parser::parse_sql(&GenericDialect {}, "SELECT 󟿾").is_err());
+    // SQLite rejects U+007F as an unrecognized token.
+    assert!(sqlite().parse_sql_statements("SELECT \u{007f}").is_err());
+}
+
+#[test]
+fn parse_create_table_string_column_names() {
+    sqlite().verified_stmt("CREATE TABLE t ('a')");
+    sqlite().verified_stmt(r#"CREATE TABLE '""' ('id' INT UNSIGNED NOT NULL)"#);
+    sqlite().verified_stmt(
+        r#"CREATE TABLE '""' ('id' INT UNSIGNED NOT NULL, 'name' TEXT NOT NULL, 'zip' INT UNSIGNED NULL)"#,
+    );
+    // Generic dialect does not support this
+    assert!(
+        sqlparser::parser::Parser::parse_sql(&GenericDialect {}, "CREATE TABLE t ('a')").is_err()
+    );
+}
+
+#[test]
+fn test_cast_empty_type() {
+    // SQLite allows CAST(expr AS) with an empty type name (typetoken can be empty)
+    // See https://www.sqlite.org/lang_expr.html
+    sqlite().verified_stmt("SELECT CAST(a AS)");
+
+    // Rejected by dialects without the flag
+    assert!(TestedDialects::new(vec![Box::new(GenericDialect {})])
+        .parse_sql_statements("SELECT CAST(a AS)")
+        .is_err());
+}
+
+#[test]
+fn parse_n_prefix_not_national_string() {
+    // In SQLite, `n'...'` is the identifier `n` followed by a string literal.
+    // The string becomes an implicit alias, so `t.n''` round-trips as `t.n AS ''`.
+    sqlite().one_statement_parses_to("SELECT t.n'' FROM t", "SELECT t.n AS '' FROM t");
+    sqlite().one_statement_parses_to("SELECT n'' FROM t", "SELECT n AS '' FROM t");
+    sqlite().one_statement_parses_to("SELECT N'hello'", "SELECT N AS 'hello'");
+
+    // Other dialects still tokenize N'...' as a national string literal.
+    all_dialects_where(|d| d.supports_national_string_literal()).verified_stmt("SELECT N'hello'");
+}
+
 fn sqlite() -> TestedDialects {
     TestedDialects::new(vec![Box::new(SQLiteDialect {})])
 }

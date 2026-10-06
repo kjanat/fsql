@@ -113,4 +113,28 @@ impl Dialect for DatabricksDialect {
     fn supports_select_item_multi_column_alias(&self) -> bool {
         true
     }
+
+    fn supports_map_literal_with_angle_brackets(&self) -> bool {
+        true
+    }
+
+    fn supports_data_type_collation(&self) -> bool {
+        true
+    }
+
+    fn supports_string_literal_backslash_escape(&self) -> bool {
+        true
+    }
+
+    fn supports_select_wildcard_replace(&self) -> bool {
+        true
+    }
+
+    fn supports_from_first_select(&self) -> bool {
+        true
+    }
+
+    fn supports_pipe_operator(&self) -> bool {
+        true
+    }
 }
