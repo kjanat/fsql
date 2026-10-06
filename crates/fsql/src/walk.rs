@@ -188,7 +188,10 @@ impl Iterator for Walker {
                         other => std::io::Error::other(other.to_string()),
                     },
                 }),
-                Err(error) => Err(scan_error(&self.root, &error)),
+                Err(error) => Err(Error::Walk {
+                    root: self.root.clone(),
+                    reason: error.to_string(),
+                }),
             });
         }
     }

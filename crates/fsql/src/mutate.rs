@@ -188,10 +188,11 @@ fn collect(
     for entry in walker {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(error) => {
+            Err(error) if skippable(&error) => {
                 errors(error);
                 continue;
             }
+            Err(error) => return Err(error),
         };
         let row = Aliased {
             alias: selection.alias,
