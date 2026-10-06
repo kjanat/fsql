@@ -126,7 +126,7 @@ fn query_schema(
 ) -> Result<Vec<String>> {
     let mut scope = scope.clone();
     for cte in &plan.ctes {
-        if plan.recursive {
+        if plan.recursive && crate::exec::mentions(&cte.query.body, &cte.name) {
             let columns = if !cte.columns.is_empty() {
                 cte.columns.clone()
             } else {
@@ -182,7 +182,7 @@ fn query_schema(
             for projection in &select.projection {
                 match projection {
                     Projection::Expr { expr, .. } => {
-                        grouped_expression(expr, &select.group_by, &schema)?
+                        grouped_expression(expr, &select.group_by, &schema, planner, &scope)?
                     }
                     Projection::Wildcard(_) => {
                         return Err(Error::Plan(
@@ -192,7 +192,7 @@ fn query_schema(
                 }
             }
             if let Some(having) = &select.having {
-                grouped_expression(having, &select.group_by, &schema)?;
+                grouped_expression(having, &select.group_by, &schema, planner, &scope)?;
             }
             for key in &plan.order_by {
                 if matches!(&key.expr, Expr::Identifier(i) if headers.iter().any(|h| h.eq_ignore_ascii_case(&i.value)))
@@ -200,7 +200,7 @@ fn query_schema(
                 {
                     continue;
                 }
-                grouped_expression(&key.expr, &select.group_by, &schema)?;
+                grouped_expression(&key.expr, &select.group_by, &schema, planner, &scope)?;
             }
         }
     }
@@ -351,7 +351,7 @@ fn select_schema(
         for projection in &select.projection {
             match projection {
                 Projection::Expr { expr, .. } => {
-                    grouped_expression(expr, &select.group_by, &schema)?
+                    grouped_expression(expr, &select.group_by, &schema, planner, scope)?
                 }
                 Projection::Wildcard(_) => {
                     return Err(Error::Plan(
@@ -361,7 +361,7 @@ fn select_schema(
             }
         }
         if let Some(having) = &select.having {
-            grouped_expression(having, &select.group_by, &schema)?;
+            grouped_expression(having, &select.group_by, &schema, planner, scope)?;
         }
     }
     Ok((headers, schema))
@@ -376,7 +376,13 @@ fn has_aggregate(expr: &Expr) -> bool {
     found
 }
 
-fn grouped_expression(expr: &Expr, groups: &[Expr], schema: &Schema) -> Result<()> {
+fn grouped_expression(
+    expr: &Expr,
+    groups: &[Expr],
+    schema: &Schema,
+    planner: &Planner,
+    scope: &Scope,
+) -> Result<()> {
     let mut result = Ok(());
     visit(expr, &mut |node| {
         if result.is_err()
@@ -386,6 +392,35 @@ fn grouped_expression(expr: &Expr, groups: &[Expr], schema: &Schema) -> Result<(
             || matches!(node, Expr::Function(f) if is_aggregate(&f.name.to_string()))
         {
             return false;
+        }
+        if let Expr::Subquery(query)
+        | Expr::Exists {
+            subquery: query, ..
+        }
+        | Expr::InSubquery {
+            subquery: query, ..
+        } = node
+        {
+            // Subqueries retain their own namespaces, but may only correlate
+            // against columns that identify this group. Do not let an empty
+            // result hide an ungrouped outer reference.
+            let mut grouped = schema.clone();
+            let allowed = groups
+                .iter()
+                .filter_map(column_name)
+                .filter_map(|name| schema.column(&name).ok())
+                .collect::<Vec<_>>();
+            for (alias, columns) in &mut grouped.tables {
+                columns.retain(|column| {
+                    allowed.contains(&format!("{alias}.{column}"))
+                        || (schema.merged.contains(column) && allowed.contains(column))
+                });
+            }
+            let names = scope.keys().cloned().collect::<Vec<_>>();
+            result = planner
+                .query_scoped(query, &names)
+                .and_then(|plan| query_schema(&plan, planner, scope, &grouped))
+                .map(|_| ());
         }
         if let Some(name) = column_name(node) {
             let bound = schema.column(&name);

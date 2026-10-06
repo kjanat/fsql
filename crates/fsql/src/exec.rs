@@ -361,7 +361,7 @@ fn set_rows(set: &ResultSet) -> Vec<Box<dyn Row + 'static>> {
         .collect()
 }
 
-fn mentions(body: &SetBody, name: &str) -> bool {
+pub(crate) fn mentions(body: &SetBody, name: &str) -> bool {
     match body {
         SetBody::Values(_) => false,
         SetBody::Op { left, right, .. } => mentions(left, name) || mentions(right, name),
@@ -1728,6 +1728,34 @@ fn select_grouped<'a>(
         referenced_exprs.push(&key.expr);
     }
     let referenced = referenced_columns(&referenced_exprs);
+    // The expression visitor deliberately stops at subquery boundaries. Keep
+    // the directly grouped columns under both qualified and bare names so a
+    // correlated subquery can resolve them from the group's snapshot.
+    let mut grouped_names = Vec::new();
+    for group in &plan.group_by {
+        match group {
+            Expr::Identifier(ident) => {
+                let name = ident.value.to_ascii_lowercase();
+                grouped_names.push(name.clone());
+                for relation in plan.relations() {
+                    grouped_names.push(format!("{}.{name}", relation.alias()));
+                }
+            }
+            Expr::CompoundIdentifier(parts) => {
+                grouped_names.push(
+                    parts
+                        .iter()
+                        .map(|p| p.value.to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join("."),
+                );
+                if let Some(column) = parts.last() {
+                    grouped_names.push(column.value.to_ascii_lowercase());
+                }
+            }
+            _ => {}
+        }
+    }
     let mut groups: Vec<Group> = Vec::new();
     let mut index: HashMap<Vec<ValueKey>, usize> = HashMap::new();
     for row in rows {
@@ -1763,11 +1791,34 @@ fn select_grouped<'a>(
                             Err(error) => return Err(error),
                         }
                     }
+                    for name in &grouped_names {
+                        if !snapshot.contains_key(name) {
+                            match row.column(name) {
+                                Ok(value) => {
+                                    snapshot.insert(name.clone(), value);
+                                }
+                                // Optional spellings can be absent or ambiguous;
+                                // required references were validated above.
+                                Err(Error::UnknownColumn(_) | Error::Plan(_)) => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
                     ctx.control.retain(
                         snapshot
-                            .values()
-                            .map(|v| row_bytes(std::slice::from_ref(v)))
-                            .sum(),
+                            .iter()
+                            .map(|(name, value)| {
+                                name.len()
+                                    .saturating_add(row_bytes(std::slice::from_ref(value)))
+                            })
+                            .fold(0usize, usize::saturating_add)
+                            .saturating_add(row_bytes(&key_values))
+                            .saturating_add(std::mem::size_of::<Group>())
+                            .saturating_add(
+                                calls
+                                    .len()
+                                    .saturating_mul(std::mem::size_of::<Accumulator>()),
+                            ),
                     )?;
                     groups.push(Group {
                         snapshot,

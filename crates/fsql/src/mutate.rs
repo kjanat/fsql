@@ -668,17 +668,35 @@ fn copy_file(
     sink.sync_all().map_err(|e| std_io(sink_path, e))
 }
 
-fn copy_out(dirfd: &OwnedFd, name: &CString, path: &Path, tomb: &Path) -> Result<()> {
+fn move_out(dirfd: &OwnedFd, name: &CString, path: &Path, tomb: &Path) -> Result<()> {
     let source = open_read(dirfd, name, path)?;
+    let tomb_dir = open_chain(tomb.parent().expect("tomb parent"))?;
     let sink = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(tomb)
         .map_err(|e| std_io(tomb, e))?;
-    copy_file(source, path, sink, tomb)
+    copy_and_remove(source, path, sink, tomb, &tomb_dir, || {
+        unlink(dirfd, name, Kind::File, path)
+    })
 }
 
-fn copy_in(tomb: &Path, dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<()> {
+fn copy_and_remove(
+    source: std::fs::File,
+    source_path: &Path,
+    sink: std::fs::File,
+    sink_path: &Path,
+    destination_dir: &OwnedFd,
+    remove_source: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    copy_file(source, source_path, sink, sink_path)?;
+    // Persist both the bytes and their directory entry before removing the
+    // only other copy. A pending journal intent cannot recover lost bytes.
+    rustix::fs::fsync(destination_dir).map_err(|e| io(sink_path, e))?;
+    remove_source()
+}
+
+fn move_in(tomb: &Path, dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<()> {
     let source = std::fs::File::open(tomb).map_err(|e| std_io(tomb, e))?;
     let fd = rustix::fs::openat(
         dirfd,
@@ -687,8 +705,9 @@ fn copy_in(tomb: &Path, dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<
         Mode::from_raw_mode(0o600),
     )
     .map_err(|e| io(path, e))?;
-    copy_file(source, tomb, std::fs::File::from(fd), path)?;
-    std::fs::remove_file(tomb).map_err(|e| std_io(tomb, e))
+    copy_and_remove(source, tomb, std::fs::File::from(fd), path, dirfd, || {
+        std::fs::remove_file(tomb).map_err(|e| std_io(tomb, e))
+    })
 }
 
 fn apply_delete(targets: &[Target], mut journal: Option<&mut Journal>) -> Result<Outcome> {
@@ -734,8 +753,7 @@ fn apply_delete(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                 Kind::File => match rustix::fs::renameat(&dirfd, &name, CWD, &tomb) {
                     Ok(()) => Some(tomb.as_os_str().as_bytes().to_vec()),
                     Err(Errno::XDEV) => {
-                        copy_out(&dirfd, &name, &frozen.path, &tomb)?;
-                        unlink(&dirfd, &name, Kind::File, &frozen.path)?;
+                        move_out(&dirfd, &name, &frozen.path, &tomb)?;
                         Some(tomb.as_os_str().as_bytes().to_vec())
                     }
                     Err(e) => return Err(io(&frozen.path, e)),
@@ -1057,7 +1075,15 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
     Ok(outcome)
 }
 
-fn apply_insert(entries: &[NewEntry], mut journal: Option<&mut Journal>) -> Result<Outcome> {
+fn apply_insert(entries: &[NewEntry], journal: Option<&mut Journal>) -> Result<Outcome> {
+    apply_insert_observed(entries, journal, |_| {})
+}
+
+fn apply_insert_observed(
+    entries: &[NewEntry],
+    mut journal: Option<&mut Journal>,
+    mut after_create: impl FnMut(&Path),
+) -> Result<Outcome> {
     let mut outcome = Outcome::default();
     for entry in entries {
         let seq = journal.as_ref().map(|j| j.next_seq()).unwrap_or(0);
@@ -1098,7 +1124,7 @@ fn apply_insert(entries: &[NewEntry], mut journal: Option<&mut Journal>) -> Resu
                 })?;
                 begun = true;
             }
-            let file = match entry.kind {
+            let mut file = match entry.kind {
                 Kind::Dir => {
                     rustix::fs::mkdirat(
                         &dirfd,
@@ -1134,32 +1160,51 @@ fn apply_insert(entries: &[NewEntry], mut journal: Option<&mut Journal>) -> Resu
                 _ => return Err(Error::Unsupported("creating special files".into())),
             };
             created = true;
+            // Keep the created inode pinned through copying, attributes and
+            // journaling. Resolving its name again could select a replacement.
+            let pinned = match &file {
+                Some(file) => rustix::io::dup(file).map_err(|e| io(&entry.path, e))?,
+                None => pin(&dirfd, &name, &entry.path)?,
+            };
+            after_create(&entry.path);
+            let empty = c"".to_owned();
             let work = (|| -> Result<()> {
-                if let Some(mut file) = file {
+                if let Some(file) = file.as_mut() {
                     if let Some(content) = &entry.content {
-                        std::io::Write::write_all(&mut file, content)
+                        std::io::Write::write_all(file, content)
                             .map_err(|e| std_io(&entry.path, e))?;
                     } else if let Some(from) = source.as_mut() {
-                        std::io::copy(from, &mut file).map_err(|e| std_io(&entry.path, e))?;
+                        std::io::copy(from, file).map_err(|e| std_io(&entry.path, e))?;
                     }
                     file.sync_all().map_err(|e| std_io(&entry.path, e))?;
                 }
                 if let Some(mode) = entry.mode
                     && entry.kind != Kind::Symlink
                 {
-                    set_mode(&dirfd, &name, &entry.path, entry.kind, mode)?;
+                    set_mode(&pinned, &empty, &entry.path, entry.kind, mode)?;
                 }
                 if entry.uid.is_some() || entry.gid.is_some() {
-                    set_owner(&dirfd, &name, &entry.path, entry.uid, entry.gid)?;
+                    set_owner(&pinned, &empty, &entry.path, entry.uid, entry.gid)?;
                 }
                 if entry.atime.is_some() || entry.mtime.is_some() {
-                    set_times(&dirfd, &name, &entry.path, entry.atime, entry.mtime)?;
+                    set_times(&pinned, &empty, &entry.path, entry.atime, entry.mtime)?;
                 }
                 Ok(())
             })();
-            let stat = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
+            let stat = rustix::fs::statx(
+                &pinned,
+                c"",
+                AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
+                STATX_MASK,
+            )
+            .map_err(|e| io(&entry.path, e))?;
+            let identity = Identity::of(&stat);
+            let named = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
                 .map_err(|e| io(&entry.path, e))?;
-            recorded_identity = Some(Identity::of(&stat));
+            if !Identity::of(&named).matches(&identity, entry.kind) {
+                return Err(Error::Stale(entry.path.clone()));
+            }
+            recorded_identity = Some(identity);
             if journal.is_some() {
                 rustix::fs::syncfs(&dirfd).map_err(|e| io(&entry.path, e))?;
             }
@@ -1255,7 +1300,7 @@ fn restore_delete(
         (Some(tomb), _) => {
             match rustix::fs::renameat_with(CWD, tomb, &dirfd, &name, RenameFlags::NOREPLACE) {
                 Ok(()) => Ok(()),
-                Err(Errno::XDEV) => copy_in(tomb, &dirfd, &name, path),
+                Err(Errno::XDEV) => move_in(tomb, &dirfd, &name, path),
                 Err(e) => Err(io(path, e)),
             }
         }
@@ -1500,6 +1545,96 @@ mod tests {
     }
 
     #[test]
+    fn insert_keeps_replacement_objects_out_of_its_journal_and_attributes() {
+        let fx = Fixture::new("insert-replaced");
+        let destination = fx.dir.join("created");
+        let moved = fx.dir.join("moved");
+        let sql = format!(
+            "insert into files(path, content, mode) values ('{}', 'original content', 0o600)",
+            destination.display()
+        );
+        let Resolved::Insert(entries) = fx.resolve(&sql) else {
+            panic!("insert")
+        };
+        let mut journal = Journal::open(&fx.base, &sql).unwrap();
+        let outcome = apply_insert_observed(&entries, Some(&mut journal), |path| {
+            std::fs::rename(path, &moved).unwrap();
+            std::fs::write(path, b"unrelated replacement").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        })
+        .unwrap();
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.partial, vec![destination.clone()]);
+        assert_eq!(outcome.recovery_required, vec![journal.dir().to_owned()]);
+        assert!(matches!(
+            undo(&fx.base, journal.id()),
+            Err(Error::RecoveryRequired(_))
+        ));
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"unrelated replacement"
+        );
+        assert_eq!(
+            std::fs::metadata(&destination).unwrap().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(std::fs::read(moved).unwrap(), b"original content");
+        assert!(
+            std::fs::read(journal.dir().join("log.jsonl"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_directory_sync_preserves_the_source_copy() {
+        let fx = Fixture::new("copy-sync-failure");
+        let source = fx.dir.join("src/keep.rs");
+        let destination = fx.dir.join("restored");
+        // O_PATH supports openat but deliberately cannot be fsynced. This
+        // injects a durability failure after the copied file has been flushed.
+        let dirfd = rustix::fs::openat(
+            CWD,
+            &fx.dir,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let result = move_in(
+            &source,
+            &dirfd,
+            &c_name(OsStr::new("restored"), &destination).unwrap(),
+            &destination,
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"fn main() {}");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"fn main() {}");
+    }
+
+    #[test]
+    fn cross_filesystem_delete_and_undo_preserve_content() {
+        let fx = Fixture::new("cross-device");
+        if std::fs::metadata(&fx.dir).unwrap().dev() == std::fs::metadata("/dev/shm").unwrap().dev()
+        {
+            return;
+        }
+        let base = PathBuf::from(format!("/dev/shm/fsql-cross-device-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let resolved = fx.resolve("delete from files where name = 'keep.rs'");
+        let mut journal = Journal::open(&base, "delete").unwrap();
+        let outcome = apply(&resolved, Some(&mut journal)).unwrap();
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(!fx.exists("src/keep.rs"));
+        let undone = undo(&base, journal.id()).unwrap();
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert_eq!(
+            std::fs::read(fx.dir.join("src/keep.rs")).unwrap(),
+            b"fn main() {}"
+        );
+        std::fs::remove_dir(&base).unwrap();
+    }
+
+    #[test]
     fn delete_moves_files_to_tombstones_and_undo_restores_them() {
         let fx = Fixture::new("delete");
         let (outcome, id) = fx.run("delete from files f where f.ext = 'tmp'");
@@ -1695,13 +1830,13 @@ mod tests {
         let (dirfd, name) = split(&file).expect("split");
         let tomb = fx.base.join("tomb-copy");
         std::fs::create_dir_all(&fx.base).expect("base");
-        copy_out(&dirfd, &name, &file, &tomb).expect("copy out");
-        let copied = std::fs::metadata(&tomb).expect("meta");
         let original = std::fs::metadata(&file).expect("meta");
+        move_out(&dirfd, &name, &file, &tomb).expect("move out");
+        let copied = std::fs::metadata(&tomb).expect("meta");
         assert_eq!(copied.mode() & 0o777, 0o640);
         assert_eq!(copied.mtime(), original.mtime());
-        std::fs::remove_file(&file).expect("unlink");
-        copy_in(&tomb, &dirfd, &name, &file).expect("copy in");
+        assert!(!file.exists());
+        move_in(&tomb, &dirfd, &name, &file).expect("move in");
         assert!(!tomb.exists());
         let restored = std::fs::metadata(&file).expect("meta");
         assert_eq!(restored.mode() & 0o777, 0o640);

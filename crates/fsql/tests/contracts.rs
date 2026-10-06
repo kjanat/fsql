@@ -396,3 +396,81 @@ fn counting_does_not_retain_every_input_row() {
         .unwrap();
     assert_eq!(set.rows, vec![vec![Value::Int(11)]]);
 }
+
+#[test]
+fn recursive_with_can_contain_nonrecursive_ctes() {
+    let fx = Fixture::new();
+    for sql in [
+        "with recursive a as (select 1 as n) select n from a",
+        "with recursive a as (select 1 as n), b as (select n from a) select n from b",
+        "with recursive a as (select 1 as n), b(n) as (select n from a union all select n + 1 from b where n < 3) select n from b order by n limit 1",
+    ] {
+        let (set, _) = fx.engine().prepare_query(sql).unwrap().collect().unwrap();
+        assert_eq!(set.rows, vec![vec![Value::Int(1)]], "{sql}");
+    }
+}
+
+#[test]
+fn correlated_subqueries_can_read_grouped_columns_only() {
+    let fx = Fixture::new();
+    fs::write(fx.path("a"), b"one").unwrap();
+    fs::write(fx.path("b"), b"two").unwrap();
+    let engine = fx.engine();
+    for group in ["f.name", "name"] {
+        for reference in ["f.name", "name"] {
+            let sql = format!(
+                "select (select {reference}) as n from files f where kind = 'file' group by {group} order by n"
+            );
+            let (set, _) = engine.prepare_query(&sql).unwrap().collect().unwrap();
+            assert_eq!(
+                set.rows,
+                vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())]],
+                "{sql}"
+            );
+        }
+    }
+    for sql in [
+        "select (select f.size) from files f group by f.name",
+        "select (select f.name) from files f where false group by kind",
+    ] {
+        assert!(engine.prepare_query(sql).is_err(), "{sql}");
+    }
+    // A subquery's own column names must not be mistaken for outer references.
+    let (set, _) = engine.prepare_query(
+        "select (select column1 from (values (7)) v) from files f where kind = 'file' group by f.name"
+    ).unwrap().collect().unwrap();
+    assert_eq!(set.rows, vec![vec![Value::Int(7)], vec![Value::Int(7)]]);
+}
+
+#[test]
+fn group_keys_are_budgeted_even_when_having_discards_every_group() {
+    let fx = Fixture::new();
+    for n in 0..20 {
+        fs::write(fx.path(&format!("{}-{n}", "x".repeat(100))), b"").unwrap();
+    }
+    let mut engine = fx.engine();
+    engine.execution.max_bytes = 1;
+    for sql in [
+        "select count(*) from files group by path having false",
+        "select count(*) from files group by lower(path) having false",
+    ] {
+        assert!(
+            matches!(
+                engine.prepare_query(sql).unwrap().collect(),
+                Err(Error::ResourceLimit(_))
+            ),
+            "{sql}"
+        );
+    }
+    engine.execution.max_bytes = 100_000;
+    assert!(
+        engine
+            .prepare_query("select count(*) from files group by path having false")
+            .unwrap()
+            .collect()
+            .unwrap()
+            .0
+            .rows
+            .is_empty()
+    );
+}

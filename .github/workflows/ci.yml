@@ -1,0 +1,32 @@
+name: Rust CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Test
+        run: cargo test --workspace --locked -j 2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -j 2 -- -D warnings
+      - name: Documentation
+        run: cargo doc --workspace --no-deps --locked -j 2
