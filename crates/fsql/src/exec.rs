@@ -2152,11 +2152,11 @@ mod tests {
         let dir = fixture("subqueries");
         let set = run_sql(
             &dir,
-            "select name from files where size = (select max(size) from files)",
+            "select name from files where kind = 'file' and size = (select max(size) from files where kind = 'file')",
         )
         .expect("run");
         assert_eq!(texts(&set, 0), ["out.tmp"]);
-        let set = run_sql(&dir, "select name from files where ext in (select ext from files where size > 2k) order by name").expect("run");
+        let set = run_sql(&dir, "select name from files where ext in (select ext from files where kind = 'file' and size > 2k) order by name").expect("run");
         assert_eq!(texts(&set, 0), ["cache.tmp", "out.tmp"]);
         let set = run_sql(
             &dir,
@@ -2188,7 +2188,7 @@ mod tests {
         let dir = fixture("ctes");
         let set = run_sql(
             &dir,
-            "with big as (select name, size from files where size > 2k), small as (select name from files where size < 20 and kind = 'file') select name from big union all select name from small order by name",
+            "with big as (select name, size from files where kind = 'file' and size > 2k), small as (select name from files where size < 20 and kind = 'file') select name from big union all select name from small order by name",
         )
         .expect("run");
         assert_eq!(texts(&set, 0), ["README", "lib.rs", "main.rs", "out.tmp"]);
