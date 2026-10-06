@@ -2,11 +2,9 @@ name: Rust CI
 
 on:
   pull_request:
-  push:
-    branches: [master]
+  push: { branches: [master] }
 
-permissions:
-  contents: read
+permissions: { contents: read }
 
 concurrency:
   group: rust-${{ github.workflow }}-${{ github.ref }}
@@ -14,12 +12,12 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
+    cancel-timeout-minutes: 1
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { persist-credentials: false }
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Check formatting
