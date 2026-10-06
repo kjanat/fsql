@@ -24,6 +24,10 @@ fsql < script.fsql     same
 `-C DIR` sets the directory the `files` table starts from. The default is the
 current directory. `files('/some/dir')` sets it per query.
 
+For editor highlighting of `.fsql` query files, use the bundled [tree-sitter grammar].
+
+[tree-sitter grammar]: tree-sitter-fsql/README.md
+
 ## Tables
 
 `files` has one row per directory entry below the root, the root included.

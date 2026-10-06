@@ -13,6 +13,9 @@
 		"**/node_modules",
 		"**/{*-,bun}lock(.*)?",
 		"vendor/**",
+		"tree-sitter-fsql/grammar/**",
+		"tree-sitter-fsql/src/**",
+		"tree-sitter-fsql/test/corpus/**",
 	],
 	"plugins": [
 		"npm:@dprint/exec@0.7.3/plugin.json@704701df449dd7e942a71144773778ac529d68c2e4657bfc236d393b898b9a67",

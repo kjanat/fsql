@@ -1,0 +1,20 @@
+/* Joins, derived tables, correlated subqueries and recursive CTEs. */
+select f.path, m.fstype from files f join mounts m on f.dev = m.dev;
+select d.name, count(f.path) from files d
+left join files f on f.parent = d.path group by d.name;
+select name from files where size = (select max(size) from files);
+select name from files p where exists (
+  select 1 from files c where c.parent = p.path and c.ext = 'rs'
+);
+with big as (select path, size from files where size > 1g)
+select * from big order by size desc;
+with recursive up(path, n) as (
+  select path, 0 from files where name = 'x'
+  union all
+  select dirname(path), n + 1 from up where path <> '/'
+) select * from up;
+select ext from files except all select 'rs';
+select ext from files intersect all select 'rs';
+select * from (values (1, 'a'), (2, 'b')) v;
+select * from files f full join mounts m using (dev);
+select * from files f cross join mounts m;

@@ -1,0 +1,32 @@
+name: Tree-sitter
+
+on:
+  pull_request:
+  push: { branches: [master] }
+
+permissions: { contents: read }
+
+concurrency:
+  group: grammar-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  grammar:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tree-sitter-fsql
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { persist-credentials: false }
+      - name: Install the pinned tree-sitter CLI
+        run: npm ci --no-audit --no-fund
+      - name: Verify generated parser
+        run: |
+          npm run generate
+          git diff --exit-code -- src
+      - name: Corpus and highlighting tests
+        run: npm test
+      - name: Query files and editor queries
+        run: npm run check

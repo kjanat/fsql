@@ -1,0 +1,10 @@
+-- fsql previews these statements unless invoked with --apply.
+delete from files f where f.ext = 'tmp' order by size desc limit 10;
+update files set mode = 0o644 where ext = 'sh' and mode & 0o111 = 0;
+update files set name = 'old_' || name where mtime < '2020-01-01';
+update files set parent = '/archive' where ext = 'log' order by size desc limit 5;
+insert into files (path, kind) values ('/tmp/scratch', 'dir');
+insert into files (path, kind, target) values ('/tmp/link', 'symlink', 'scratch');
+insert into files (path, content) values ('/tmp/note', 'it''s a note');
+insert into files (path, source)
+select path || '.bak', path from files where ext = 'conf';

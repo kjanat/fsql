@@ -1,0 +1,6 @@
+select 1b, 1K, 1m, 1g, 1t, 1p, 1KiB, 1mib, 1gib, 1tib, 1pib,
+       1kb, 1mb, 1gb, 1tb, 1pb, 1_024k, 1.5mib, .5k, 1e3b,
+       0o755, 0O644, 0o7_55, 1_000, 3.25, -7, +3;
+select true, false, null, 'quoted '' string', "quoted identifier", `name`;
+select 1 where not (true xor false);
+select interval '7' day, interval '1' hour, interval '30 days';

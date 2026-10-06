@@ -1,0 +1,593 @@
+================================================================================
+fsql byte suffixes and octal modes
+================================================================================
+
+SELECT 1b, 1K, 1m, 1g, 1t, 1p, 1KiB, 1mib, 1gib, 1tib, 1pib,
+       1kb, 1mb, 1gb, 1tb, 1pb, 1_024k, 1.5MiB, .5k, 1e3b, -2k, +4GB,
+       0o755, 0O644, 0o7_55, 0b1010, 0xFF, 1_000;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))))))
+
+================================================================================
+fsql pattern operators and boolean precedence
+================================================================================
+
+SELECT path FROM files WHERE name GLOB '*.rs' AND name REGEXP '^a' OR name MATCH 'lib';
+SELECT 1 WHERE true XOR false;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (field
+            (identifier)))))
+    (from
+      (keyword_from)
+      (relation
+        (object_reference
+          (identifier)))
+      (where
+        (keyword_where)
+        (binary_expression
+          (binary_expression
+            (binary_expression
+              (field
+                (identifier))
+              (keyword_glob)
+              (literal))
+            (keyword_and)
+            (binary_expression
+              (field
+                (identifier))
+              (keyword_rlike)
+              (literal)))
+          (keyword_or)
+          (binary_expression
+            (field
+              (identifier))
+            (keyword_match)
+            (literal))))))
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (literal))))
+    (where
+      (keyword_where)
+      (binary_expression
+        (literal
+          (keyword_true))
+        (keyword_xor)
+        (literal
+          (keyword_false))))))
+
+================================================================================
+fsql keyword prefixes remain identifiers
+================================================================================
+
+SELECT globbed, xor_value, day_count FROM files;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (field
+            (identifier)))
+        (term
+          (field
+            (identifier)))
+        (term
+          (field
+            (identifier)))))
+    (from
+      (keyword_from)
+      (relation
+        (object_reference
+          (identifier))))))
+
+================================================================================
+fsql file relation alias and qualified columns
+================================================================================
+
+SELECT f.path, human(f.size) FROM files('/tmp/é') AS f WHERE f.size > 1.5MiB;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (field
+            (object_reference
+              (identifier))
+            (identifier)))
+        (term
+          (invocation
+            (object_reference
+              (identifier))
+            (term
+              (field
+                (object_reference
+                  (identifier))
+                (identifier)))))))
+    (from
+      (keyword_from)
+      (relation
+        (invocation
+          (object_reference
+            (identifier))
+          (term
+            (literal)))
+        (keyword_as)
+        (identifier))
+      (where
+        (keyword_where)
+        (binary_expression
+          (field
+            (object_reference
+              (identifier))
+            (identifier))
+          (literal))))))
+
+================================================================================
+fsql interval units and permission masks
+================================================================================
+
+SELECT mode & 0o111 FROM files WHERE mtime < now() - INTERVAL '7' DAY;
+SELECT INTERVAL '30 days', INTERVAL '1' HOUR;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (binary_expression
+            (field
+              (identifier))
+            (op_other)
+            (literal)))))
+    (from
+      (keyword_from)
+      (relation
+        (object_reference
+          (identifier)))
+      (where
+        (keyword_where)
+        (binary_expression
+          (field
+            (identifier))
+          (binary_expression
+            (invocation
+              (object_reference
+                (identifier)))
+            (interval
+              (keyword_interval)
+              (interval_unit)))))))
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (interval
+            (keyword_interval)))
+        (term
+          (interval
+            (keyword_interval)
+            (interval_unit)))))))
+
+================================================================================
+fsql SELECT clauses without FROM
+================================================================================
+
+SELECT 1 WHERE true ORDER BY 1 DESC LIMIT 1 OFFSET 0;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (literal))))
+    (where
+      (keyword_where)
+      (literal
+        (keyword_true)))
+    (order_by
+      (keyword_order)
+      (keyword_by)
+      (order_target
+        (literal)
+        (direction
+          (keyword_desc))))
+    (limit
+      (keyword_limit)
+      (literal)
+      (offset
+        (keyword_offset)
+        (literal)))))
+
+================================================================================
+fsql DELETE alias and bounded selection
+================================================================================
+
+DELETE FROM files AS f WHERE f.ext = 'tmp' ORDER BY f.size DESC LIMIT 10;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (delete
+      (keyword_delete))
+    (from
+      (keyword_from)
+      (relation
+        (object_reference
+          (identifier))
+        (keyword_as)
+        (identifier))
+      (where
+        (keyword_where)
+        (binary_expression
+          (field
+            (object_reference
+              (identifier))
+            (identifier))
+          (literal)))
+      (order_by
+        (keyword_order)
+        (keyword_by)
+        (order_target
+          (field
+            (object_reference
+              (identifier))
+            (identifier))
+          (direction
+            (keyword_desc))))
+      (limit
+        (keyword_limit)
+        (literal)))))
+
+================================================================================
+fsql UPDATE assignments and bounded selection
+================================================================================
+
+UPDATE files SET mode = 0o755, name = 'new-' || name WHERE size < 1k ORDER BY path LIMIT 2;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (update
+      (keyword_update)
+      (relation
+        (object_reference
+          (identifier)))
+      (keyword_set)
+      (assignment
+        (field
+          (identifier))
+        (literal))
+      (assignment
+        (field
+          (identifier))
+        (binary_expression
+          (literal)
+          (op_other)
+          (field
+            (identifier))))
+      (where
+        (keyword_where)
+        (binary_expression
+          (field
+            (identifier))
+          (literal))))
+    (order_by
+      (keyword_order)
+      (keyword_by)
+      (order_target
+        (field
+          (identifier))))
+    (limit
+      (keyword_limit)
+      (literal))))
+
+================================================================================
+fsql INSERT rows and SELECT
+================================================================================
+
+INSERT INTO files (path, content) VALUES ('a.txt', 'it''s text');
+INSERT INTO files (path) SELECT name FROM files WHERE ext = 'log';
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (insert
+      (keyword_insert)
+      (keyword_into)
+      (object_reference
+        (identifier))
+      (list
+        (column
+          (identifier))
+        (column
+          (identifier)))
+      (keyword_values)
+      (list
+        (literal)
+        (literal))))
+  (statement
+    (insert
+      (keyword_insert)
+      (keyword_into)
+      (object_reference
+        (identifier))
+      (list
+        (column
+          (identifier)))
+      (select
+        (keyword_select)
+        (select_expression
+          (term
+            (field
+              (identifier)))))
+      (from
+        (keyword_from)
+        (relation
+          (object_reference
+            (identifier)))
+        (where
+          (keyword_where)
+          (binary_expression
+            (field
+              (identifier))
+            (literal)))))))
+
+================================================================================
+fsql set quantifiers
+================================================================================
+
+SELECT 1 EXCEPT ALL SELECT 2 INTERSECT DISTINCT SELECT 3 UNION ALL SELECT 4;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (set_operation
+      (select
+        (keyword_select)
+        (select_expression
+          (term
+            (literal))))
+      (keyword_except)
+      (keyword_all)
+      (select
+        (keyword_select)
+        (select_expression
+          (term
+            (literal))))
+      (keyword_intersect)
+      (keyword_distinct)
+      (select
+        (keyword_select)
+        (select_expression
+          (term
+            (literal))))
+      (keyword_union)
+      (keyword_all)
+      (select
+        (keyword_select)
+        (select_expression
+          (term
+            (literal)))))))
+
+================================================================================
+fsql VALUES and CTE
+================================================================================
+
+VALUES (1, 1KiB), (2, 2kb);
+WITH sizes(n, size) AS (VALUES (1, 1k)) SELECT * FROM sizes;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (values
+      (keyword_values)
+      (list
+        (literal)
+        (literal))
+      (list
+        (literal)
+        (literal))))
+  (statement
+    (keyword_with)
+    (cte
+      (identifier)
+      (identifier)
+      (identifier)
+      (keyword_as)
+      (statement
+        (values
+          (keyword_values)
+          (list
+            (literal)
+            (literal)))))
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (all_fields))))
+    (from
+      (keyword_from)
+      (relation
+        (object_reference
+          (identifier))))))
+
+================================================================================
+fsql empty statements and optional final semicolon
+================================================================================
+
+; ; SELECT 1;;; -- trailing comment
+SELECT 2
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (literal)))))
+  (comment)
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (literal))))))
+
+================================================================================
+fsql comments and escaped paths
+================================================================================
+
+/* query file */
+SELECT 'a;--b', '/tmp/it''s.txt', $$a 'quoted' path$$ FROM files; -- done
+
+
+--------------------------------------------------------------------------------
+
+(program
+  (marginalia)
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          (literal))
+        (term
+          (literal))
+        (term
+          (literal))))
+    (from
+      (keyword_from)
+      (relation
+        (object_reference
+          (identifier)))))
+  (comment))
+
+================================================================================
+fsql incomplete statement preserves following query
+================================================================================
+
+SELECT path FROM files WHERE ;
+SELECT size FROM files;
+
+--------------------------------------------------------------------------------
+
+(program
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          value: (field
+            name: (identifier)))))
+    (from
+      (keyword_from)
+      (relation
+        (object_reference
+          name: (identifier)))))
+  (ERROR
+    (keyword_where))
+  (statement
+    (select
+      (keyword_select)
+      (select_expression
+        (term
+          value: (field
+            name: (identifier)))))
+    (from
+      (keyword_from)
+      (relation
+        (object_reference
+          name: (identifier))))))
