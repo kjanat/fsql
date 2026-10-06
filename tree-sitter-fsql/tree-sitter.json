@@ -23,7 +23,8 @@
 			}
 		],
 		"links": {
-			"repository": "https://github.com/kjanat/fsql"
+			"repository": "https://github.com/kjanat/fsql",
+			"funding": "https://github.com/sponsors/kjanat"
 		}
 	},
 	"bindings": {

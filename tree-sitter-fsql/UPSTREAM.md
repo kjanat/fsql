@@ -6,7 +6,7 @@ The upstream MIT license and copyright notice are retained in `LICENSE`.
 
 Copied inputs: `grammar.js`, `grammar/`, `src/scanner.c`, `queries/`, and selected
 `test/corpus/` cases. Packaging, documentation, examples, and fsql-specific tests
-are local. The generated parser is produced with tree-sitter CLI 0.26.8, ABI 15.
+are local. The generated parser is produced with tree-sitter CLI 0.27.0, ABI 15.
 
 ## Local adaptations
 
