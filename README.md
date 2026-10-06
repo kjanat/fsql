@@ -14,7 +14,7 @@ fsql undo 18d32e8f3c07b302-129aef
 
 ## Input
 
-```
+```sh
 fsql -e SQL            one or more statements from the argument, repeatable
 fsql FILE              statements from a file
 fsql -                 statements from stdin
@@ -75,7 +75,7 @@ calls `statx`.
 
 ## Literals and operators
 
-```
+```sql
 size > 1g            binary units: k m g t p, kib mib gib tib pib
 size > 4gb           decimal units: kb mb gb tb pb
 mode & 0o111         octal
@@ -96,7 +96,7 @@ mismatch, so `size > 'big'` fails instead of matching nothing.
 
 ## Joins, subqueries, CTEs, set operations
 
-```
+```sql
 select f.path, m.fstype from files f join mounts m on f.dev = m.dev
 select d.name, count(f.path) from files d left join files f on f.parent = d.path group by d.name
 select name from files where size = (select max(size) from files)
@@ -114,7 +114,7 @@ tables and `VALUES`. Column references may be qualified with a table alias.
 
 ## Mutations
 
-```
+```sql
 delete from files where ext = 'tmp'
 update files set mode = 0o644 where ext = 'sh' and mode & 0o111 = 0
 update files set name = 'old_' || name where mtime < '2020-01-01'
@@ -159,7 +159,7 @@ attributes when the journal is on another filesystem. Deleted directories and
 links are recorded, updates keep a before-image, inserts record what was
 created.
 
-```
+```sh
 fsql journal          list journals
 fsql undo ID          reverse one journal
 ```
@@ -172,10 +172,12 @@ fsql undo ID          reverse one journal
 
 ## Build
 
-```
+```sh
 cargo build --release
 cargo test --workspace
 ```
 
 `vendor/sqlparser` is a patched copy of `sqlparser-rs`; see `vendor/README.md`.
 `tree-fucker` is a git dependency on `github.com/kjanat/tree-fucker`, pinned in `Cargo.lock`.
+
+<!-- rumdl-disable-file line-length -->

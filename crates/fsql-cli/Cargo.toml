@@ -8,9 +8,14 @@ repository.workspace   = true
 license.workspace      = true
 
 [[bin]]
+doc  = false
 name = "fsql"
 path = "src/main.rs"
 
 [dependencies]
-clap           = { version = "4.6.6", features = ["derive"] }
 fsql.workspace = true
+
+clap.workspace = true
+
+[lints]
+workspace = true

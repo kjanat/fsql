@@ -5,10 +5,27 @@ exclude  = ["vendor"]
 
 [workspace.package]
 edition      = "2024"
-rust-version = "1.97"
+rust-version = "1.99"
 repository   = "https://github.com/kjanat/fsql"
 license      = "MIT"
 
 [workspace.dependencies]
 fsql      = { path = "crates/fsql" }
 sqlparser = { path = "vendor/sqlparser" }
+
+clap       = { version = "4.6.6", features = ["derive"] }
+globset    = "0.4.20"
+regex      = "1.13.1"
+rustix     = { version = "1.1.4", features = ["fs", "process"] }
+serde      = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+uzers      = "0.12.2"
+
+[workspace.dependencies.tree-fucker]
+git = "https://github.com/kjanat/tree-fucker"
+rev = "c6c16eb07a7c1e00b45c9f9e1c01321afb347329"
+
+[workspace.lints]
+clippy  = {}
+rust    = { unsafe_code = "forbid" }
+rustdoc = { all = "deny" }
