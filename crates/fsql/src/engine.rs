@@ -25,11 +25,11 @@ impl Engine {
         }
     }
     pub fn prepare_query(&self, sql: &str) -> Result<PreparedQuery> {
-        let mut plans = self.planner.plan(sql)?;
-        if plans.len() != 1 {
+        let mut plans = self.planner.plan(sql)?.into_iter();
+        let (Some(plan), None) = (plans.next(), plans.next()) else {
             return Err(Error::Plan("expected one query".into()));
-        }
-        let Plan::Select(plan) = plans.remove(0) else {
+        };
+        let Plan::Select(plan) = plan else {
             return Err(Error::Plan("expected SELECT".into()));
         };
         Ok(PreparedQuery {
@@ -39,12 +39,15 @@ impl Engine {
         })
     }
     pub fn resolve_mutation(&self, sql: &str) -> Result<ResolvedMutation> {
-        let mut plans = self.planner.plan(sql)?;
-        if plans.len() != 1 || !plans[0].is_mutation() {
+        let mut plans = self.planner.plan(sql)?.into_iter();
+        let (Some(plan), None) = (plans.next(), plans.next()) else {
+            return Err(Error::Plan("expected one mutation".into()));
+        };
+        if !plan.is_mutation() {
             return Err(Error::Plan("expected one mutation".into()));
         }
         let resolved = mutate::resolve_with_options(
-            &plans.remove(0),
+            &plan,
             &self.planner,
             self.execution.clone(),
             &mut |_| {},

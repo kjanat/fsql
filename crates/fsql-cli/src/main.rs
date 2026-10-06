@@ -94,6 +94,11 @@ enum Command {
         /// Journal id printed when the statement was applied
         id: String,
     },
+    /// Finish interrupted prepared mutations or resume an interrupted undo
+    Recover {
+        /// Journal id printed when the statement was applied
+        id: String,
+    },
     /// List applied statements that can be undone
     Journal,
 }
@@ -119,6 +124,15 @@ fn run(cli: Cli) -> Result<ExitCode, Error> {
         .clone()
         .unwrap_or_else(journal::default_base);
     match &cli.command {
+        Some(Command::Recover { id }) => {
+            let outcome = mutate::recover(&base, id)?;
+            report_failures(&outcome);
+            println!(
+                "RECOVER {id}: completed {} recorded operations",
+                outcome.applied
+            );
+            return Ok(exit_for(&outcome));
+        }
         Some(Command::Undo { id }) => {
             let outcome = mutate::undo(&base, id)?;
             report_failures(&outcome);
@@ -262,8 +276,9 @@ fn report_failures(outcome: &Outcome) {
     }
     for path in &outcome.recovery_required {
         eprintln!(
-            "fsql: {} requires recovery reconciliation; pending intents were retained",
-            path.display()
+            "fsql: {} has unfinished steps; retry with: fsql recover {}",
+            path.display(),
+            path.file_name().unwrap_or_default().to_string_lossy()
         );
     }
     for (path, error) in &outcome.failures {

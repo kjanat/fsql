@@ -301,7 +301,7 @@ fn library_mutation_cap_is_enforced_before_apply() {
 }
 
 #[test]
-fn a_partial_insert_is_recorded_and_can_be_undone() {
+fn a_failed_insert_preparation_never_exposes_partial_content() {
     if rustix::process::geteuid().is_root() {
         return;
     }
@@ -318,11 +318,11 @@ fn a_partial_insert_is_recorded_and_can_be_undone() {
         .apply(&base)
         .unwrap();
     assert_eq!(outcome.applied, 0);
-    assert_eq!(outcome.partial.len(), 1);
-    assert_eq!(fs::read(fx.path("partial")).unwrap(), b"written");
-    assert_eq!(journal::load(&base, &id).unwrap().len(), 1);
+    assert!(outcome.partial.is_empty());
+    assert!(!fx.path("partial").exists());
+    assert!(journal::load(&base, &id).unwrap().is_empty());
     let undone = fsql::mutate::undo(&base, &id).unwrap();
-    assert_eq!(undone.applied, 1);
+    assert_eq!(undone.applied, 0);
     assert!(!fx.path("partial").exists());
 }
 

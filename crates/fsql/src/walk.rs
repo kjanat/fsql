@@ -13,7 +13,7 @@ use tree_fucker::domain::DomainCrossing;
 use tree_fucker::entry::EntryKind;
 use tree_fucker::fs::{FsError, ObservedKind};
 use tree_fucker::path::RelativePath;
-use tree_fucker::policy::{LoadAll, LoadDepth, ScanPolicy};
+use tree_fucker::policy::{PathPredicate, ScanDecision, ScanPolicy};
 use tree_fucker::scan::{Scan, ScanEntry, ScanEvent, ScanFailure, ScanOptions};
 use tree_fucker::std_fs::StdFileSystem;
 use tree_fucker::{HostConfig, HostGovernor, HostGovernorError};
@@ -31,6 +31,24 @@ pub struct WalkOptions {
     pub max_depth: Option<u32>,
     pub one_filesystem: bool,
     pub initial_depth: u32,
+}
+
+/// Private recovery directories reserve `.fsql-<hex>-<hex>-<decimal>` names.
+pub(crate) fn recovery_name(name: &std::ffi::OsStr) -> bool {
+    let Some(suffix) = name.to_str().and_then(|s| s.strip_prefix(".fsql-")) else {
+        return false;
+    };
+    let parts: Vec<_> = suffix.split('-').collect();
+    parts.len() == 3
+        && parts.iter().all(|p| !p.is_empty())
+        && parts[..2]
+            .iter()
+            .all(|p| p.bytes().all(|c| c.is_ascii_hexdigit()))
+        && parts[2].bytes().all(|c| c.is_ascii_digit())
+}
+
+pub(crate) fn recovery_path(path: &Path) -> bool {
+    path.components().any(|p| recovery_name(p.as_os_str()))
 }
 
 pub fn install_governor() -> std::result::Result<HostGovernor, HostGovernorError> {
@@ -133,12 +151,24 @@ pub struct Walker {
 
 impl Walker {
     pub fn new(root: &Path, options: WalkOptions) -> Result<Self> {
-        let policy: Arc<dyn ScanPolicy> = match options.max_depth {
-            Some(max) => Arc::new(LoadDepth {
-                depth: max.saturating_sub(options.initial_depth) as usize,
-            }),
-            None => Arc::new(LoadAll),
-        };
+        if recovery_path(root) {
+            return Err(Error::Plan(
+                "private recovery directories cannot be queried".into(),
+            ));
+        }
+        let depth = options
+            .max_depth
+            .map(|max| max.saturating_sub(options.initial_depth) as usize);
+        let policy: Arc<dyn ScanPolicy> =
+            Arc::new(PathPredicate::new(move |path: &RelativePath, _| {
+                if path.file_name().is_some_and(recovery_name) {
+                    ScanDecision::Excluded
+                } else {
+                    ScanDecision::Eligible {
+                        initially_loaded: depth.is_none_or(|max| path.depth() < max),
+                    }
+                }
+            }));
         let scan_options = ScanOptions {
             crossing: match options.one_filesystem {
                 true => DomainCrossing::Exclude,
@@ -156,6 +186,11 @@ impl Walker {
         )
         .map_err(|error| scan_error(root, &error))?;
         let root = scan.root().to_path_buf();
+        if recovery_path(&root) {
+            return Err(Error::Plan(
+                "private recovery directories cannot be queried".into(),
+            ));
+        }
         Ok(Self {
             shared: Shared::new(),
             scan,

@@ -2292,7 +2292,9 @@ mod tests {
         let Plan::Select(query) = planner
             .plan("select count(*), sum(size), min(size), max(size) from files")
             .expect("plan")
-            .remove(0)
+            .into_iter()
+            .next()
+            .expect("one query")
         else {
             panic!("select")
         };

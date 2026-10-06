@@ -169,28 +169,48 @@ while `where path glob '/x/build*'` removes the tree.
 ## Journal and undo
 
 Each applied statement writes a journal under `$XDG_DATA_HOME/fsql/journal`
-(override with `--journal-dir` or `FSQL_JOURNAL_DIR`). Deleted files are
-renamed into the journal, or copied with mode, owner, times and extended
-attributes when the journal is on another filesystem. Deleted directories and
-links are recorded, updates keep a before-image, inserts record what was
-created.
+(override with `--journal-dir` or `FSQL_JOURNAL_DIR`). Inserts are prepared
+privately, including their contents and attributes, before becoming visible.
+Deletes retain the original file, empty directory or symlink in a private
+`.fsql-ID-N` staging directory on the affected filesystem. This preserves the
+original inode and metadata even when the journal is on another filesystem.
+Staging stays outside directories the statement removes; keep these directories
+until undo completes. Their `.fsql-<hex>-<hex>-<decimal>` names are reserved and
+excluded from fsql scans and mutation destinations. Creating them requires write
+access to a surviving parent.
+Metadata-only updates keep their staging in the journal directory.
 
-Journals persist an intent before each operation and synchronize completion
-records after the filesystem change. A partially created file is recorded for
-undo even when a later attribute update fails. Special files that cannot be
-recreated are refused when journaling is enabled.
-
-Interrupted operations retain their intent files and appear as
-`[RECOVERY REQUIRED]` in the journal list. Automatic undo refuses these journals:
-the recorded intent and current filesystem must be reconciled before manual
-recovery. Completed undo steps are checkpointed so they are not replayed.
-Legacy update records without object identity are also refused by automatic
-undo. This is conservative recovery fencing, not automatic crash rollback.
+Every visible step has a durable replay record and an inverse. Completion
+checkpoints are published atomically after synchronizing filesystem changes.
+Interrupted operations appear as `[RECOVERY REQUIRED]` in the journal list:
 
 ```sh
-fsql journal          list journals
-fsql undo ID          reverse one journal
+fsql journal          # list active journals
+fsql recover ID       # finish prepared entries, or resume an interrupted undo
+fsql undo ID          # reverse applied steps, including an interrupted apply
 ```
+
+Recovery discards incomplete private preparations and finishes entries whose
+preparation was durably recorded. It does not rerun the SQL or apply rows that
+had not reached preparation. Undo can reverse a partially applied entry even
+when its remaining forward step cannot succeed. Both commands can be interrupted
+and retried; completed steps are checkpointed. A finished undo retains completion
+records, hidden from `fsql journal`, so repeated recovery is harmless. The
+library exposes the same behavior through `fsql::mutate::{recover, undo}`.
+
+Recovery checks object identity and recorded metadata. It preserves conflicting
+objects and reports their paths instead of overwriting them. Resolve the reported
+conflict (for example, move an unrelated destination aside), then retry. A journal
+lock prevents simultaneous apply, recover and undo on that journal. Other
+processes may still edit the filesystem; these operations do not provide SQL
+transaction isolation or make an entire statement atomic. Filesystems must
+support durable synchronization and the required same-filesystem renames.
+
+Legacy journals remain readable and completed legacy operations can be undone.
+Interrupted legacy intents lack the staging evidence needed for safe replay and
+still require manual reconciliation; update records without object identity
+remain ineligible for automatic undo. Special-file deletion is refused when
+journaling is enabled.
 
 `--no-journal` applies without any of this and cannot be undone.
 

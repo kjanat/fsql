@@ -93,6 +93,10 @@ impl Journal {
         let id = format!("{:x}-{:x}", nanos, std::process::id());
         let dir = base.join(&id);
         std::fs::create_dir(&dir).map_err(|e| io(&dir, e))?;
+        let dir = std::fs::canonicalize(&dir).map_err(|e| io(&dir, e))?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| io(&dir, e))?;
         std::fs::create_dir(dir.join("tomb")).map_err(|e| io(&dir, e))?;
         std::fs::write(dir.join("statement.sql"), sql).map_err(|e| io(&dir, e))?;
         let log_path = dir.join("log.jsonl");
@@ -125,6 +129,12 @@ impl Journal {
 
     pub fn next_seq(&self) -> u64 {
         self.seq
+    }
+
+    pub(crate) fn reserve_seq(&mut self) -> u64 {
+        let seq = self.seq;
+        self.seq += 1;
+        seq
     }
 
     pub fn tomb_path(&self, seq: u64) -> PathBuf {
@@ -180,6 +190,9 @@ pub fn list(base: &Path) -> Result<Vec<Summary>> {
     for entry in entries {
         let entry = entry.map_err(|e| io(base, e))?;
         let dir = entry.path();
+        if dir.join("finished").exists() {
+            continue;
+        }
         let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -201,11 +214,23 @@ pub fn list(base: &Path) -> Result<Vec<Summary>> {
 pub fn load(base: &Path, id: &str) -> Result<Vec<Record>> {
     validate_id(id)?;
     let dir = base.join(id);
+    if dir.join("finished").exists() {
+        return Ok(Vec::new());
+    }
     for entry in std::fs::read_dir(&dir).map_err(|e| io(&dir, e))? {
         let entry = entry.map_err(|e| io(&dir, e))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("pending-") || name.starts_with("undo-pending-") {
+            return Err(Error::RecoveryRequired(entry.path()));
+        }
+        if name.starts_with("replay-") && name.ends_with(".json") {
+            let seq = name.trim_start_matches("replay-").trim_end_matches(".json");
+            if !dir.join(format!("complete-{seq}.json")).exists() || dir.join("undoing").exists() {
+                return Err(Error::RecoveryRequired(entry.path()));
+            }
+        }
+        if name.starts_with("prepare-") && name.ends_with(".json") {
             return Err(Error::RecoveryRequired(entry.path()));
         }
     }
@@ -223,6 +248,22 @@ pub fn load(base: &Path, id: &str) -> Result<Vec<Record>> {
             records.push(record);
         }
     }
+    for entry in std::fs::read_dir(&dir).map_err(|e| io(&dir, e))? {
+        let entry = entry.map_err(|e| io(&dir, e))?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("complete-")
+            && name.to_string_lossy().ends_with(".json")
+        {
+            let record: Record = serde_json::from_slice(
+                &std::fs::read(entry.path()).map_err(|e| io(&entry.path(), e))?,
+            )
+            .map_err(|e| Error::Plan(e.to_string()))?;
+            if !dir.join(format!("undone-{}", record.seq())).exists() {
+                records.push(record);
+            }
+        }
+    }
+    records.sort_by_key(Record::seq);
     Ok(records)
 }
 
@@ -233,11 +274,50 @@ pub fn remove(base: &Path, id: &str) -> Result<()> {
     sync_dir(base)
 }
 
-fn validate_id(id: &str) -> Result<()> {
+pub(crate) fn validate_id(id: &str) -> Result<()> {
     if id.is_empty() || !id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
         return Err(Error::Plan("invalid journal id".into()));
     }
     Ok(())
+}
+
+pub(crate) struct Lock(File);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // Closing alone can leave a flock held briefly by an unrelated child
+        // forked on another thread before its close-on-exec descriptors close.
+        let _ = self.0.unlock();
+    }
+}
+
+pub(crate) fn lock(dir: &Path) -> Result<Lock> {
+    let path = dir.join("lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| io(&path, e))?;
+    file.try_lock()
+        .map_err(|e| Error::Plan(format!("journal {} is busy: {e}", dir.display())))?;
+    Ok(Lock(file))
+}
+
+/// Publish a complete checkpoint; a torn temporary file is never replayed.
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+    let temporary = path.with_extension("tmp");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|e| io(&temporary, e))?;
+    file.write_all(data)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| io(&temporary, e))?;
+    std::fs::rename(&temporary, path).map_err(|e| io(path, e))?;
+    sync_dir(path.parent().expect("journal parent"))
 }
 
 pub(crate) fn sync_dir(path: &Path) -> Result<()> {

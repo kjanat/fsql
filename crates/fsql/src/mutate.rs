@@ -22,6 +22,9 @@ use crate::value::Value;
 use crate::walk::{Walker, c_name, open_chain, validate_path};
 use crate::xattr;
 
+mod recovery;
+pub use recovery::recover;
+
 #[derive(Debug, Clone)]
 pub struct Before {
     pub mode: u32,
@@ -599,10 +602,30 @@ fn verify_all(targets: &[Target]) -> Result<()> {
 }
 
 pub fn apply(resolved: &Resolved, journal: Option<&mut Journal>) -> Result<Outcome> {
+    let mut paths: Vec<&Path> = resolved.paths().into_iter().map(|(p, _)| p).collect();
+    if let Resolved::Update(targets) = resolved {
+        paths.extend(targets.iter().flat_map(|t| {
+            t.changes.iter().filter_map(|c| {
+                if let Change::Rename(p) = c {
+                    Some(p.as_path())
+                } else {
+                    None
+                }
+            })
+        }));
+    }
+    if paths.into_iter().any(crate::walk::recovery_path) {
+        return Err(Error::Plan(
+            "private recovery paths are reserved; use recover or undo".into(),
+        ));
+    }
+    if let Some(journal) = journal {
+        return recovery::apply(resolved, journal);
+    }
     match resolved {
-        Resolved::Delete(targets) => apply_delete(targets, journal),
-        Resolved::Update(targets) => apply_update(targets, journal),
-        Resolved::Insert(entries) => apply_insert(entries, journal),
+        Resolved::Delete(targets) => apply_delete(targets, None),
+        Resolved::Update(targets) => apply_update(targets, None),
+        Resolved::Insert(entries) => apply_insert(entries, None),
     }
 }
 
@@ -1398,6 +1421,9 @@ fn restore_insert(path: &Path, kind: Kind, recorded: Identity) -> Result<()> {
 }
 
 pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
+    if recovery::is_replay_journal(base, id)? {
+        return recovery::undo(base, id);
+    }
     let records = journal::load(base, id)?;
     let mut outcome = Outcome::default();
     for record in records.iter().rev() {
@@ -1631,7 +1657,7 @@ mod tests {
             std::fs::read(fx.dir.join("src/keep.rs")).unwrap(),
             b"fn main() {}"
         );
-        std::fs::remove_dir(&base).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
