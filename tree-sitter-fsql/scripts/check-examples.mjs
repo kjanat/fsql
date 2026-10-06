@@ -22,6 +22,10 @@ function run(...args) {
 run('parse', '--quiet', ...examples);
 run('highlight', '--quiet', '--scope', 'source.fsql', ...examples);
 run('query', '--quiet', 'queries/indents.scm', ...examples);
+const zedQueries = '../../editors/zed/languages/fsql/';
+for (const name of readdirSync(new URL(zedQueries, import.meta.url)).filter(name => name.endsWith('.scm'))) {
+	run('query', '--quiet', `../editors/zed/languages/fsql/${name}`, ...examples);
+}
 // Match an incremental reparse to a fresh parse, including scanner-backed
 // dollar strings. Both trees must retain the statement after the edit.
 const temporary = mkdtempSync(join(tmpdir(), 'fsql-grammar-'));

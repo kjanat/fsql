@@ -1,0 +1,16 @@
+id             = "fsql"
+name           = "fsql"
+version        = "0.0.1"
+schema_version = 1
+authors        = ["Kaj Kowalski <info@kajkowalski.nl>"]
+description    = "Syntax highlighting, completion, and hover for fsql query files."
+repository     = "https://github.com/kjanat/fsql"
+
+[grammars.fsql]
+repository = "https://github.com/kjanat/fsql"
+rev        = "5b4cb65c7b51b5a8432e6304339a0eda49ec9c13"
+path       = "tree-sitter-fsql"
+
+[language_servers.fsql]
+name      = "fsql LSP"
+languages = ["fsql"]

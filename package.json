@@ -14,11 +14,16 @@
 	"scripts": {
 		"grammar:check": "run @kjanat/tree-sitter-fsql:check",
 		"grammar:generate": "run @kjanat/tree-sitter-fsql:generate",
-		"grammar:test": "run @kjanat/tree-sitter-fsql:test"
+		"grammar:test": "run @kjanat/tree-sitter-fsql:test",
+		"lsp:build": "run @kjanat/fsql-lsp:build",
+		"lsp:check": "run @kjanat/fsql-lsp:check",
+		"lsp:start": "run @kjanat/fsql-lsp:start",
+		"lsp:test": "run @kjanat/fsql-lsp:test"
 	},
 	"devDependencies": {
 		"runner-run": "catalog:",
-		"tombi": "^1.7.2"
+		"tombi": "catalog:",
+		"typescript": "catalog:"
 	},
 	"packageManager": "bun@1.4.2",
 	"devEngines": {
@@ -29,7 +34,11 @@
 	},
 	"catalog": {
 		"runner-run": "^0.27.1",
-		"tree-sitter-cli": "^0.27.0"
+		"tree-sitter-cli": "^0.27.0",
+		"@types/bun": "^1.4.2",
+		"tombi": "^1.7.3",
+		"typescript": "^7.0.2",
+		"tsdown": "^0.23.0"
 	},
 	"trustedDependencies": [
 		"tree-sitter-cli"

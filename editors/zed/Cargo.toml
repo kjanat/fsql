@@ -1,0 +1,16 @@
+[package]
+name                 = "fsql-zed"
+version              = "0.0.1"
+edition.workspace    = true
+repository.workspace = true
+license.workspace    = true
+publish              = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "=0.7.0"
+
+[lints]
+workspace = true
