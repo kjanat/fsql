@@ -1,0 +1,35 @@
+{
+	"name": "@kjanat/fsql-lsp",
+	"version": "0.0.1",
+	"private": true,
+	"description": "Small stdio language server for fsql queries",
+	"license": "MIT",
+	"type": "module",
+	"imports": {
+		"#*": "./src/*.ts",
+		"#pkg": "./package.json"
+	},
+	"exports": {
+		"./worker": "./dist/browser/worker.mjs",
+		"./package.json": "./package.json"
+	},
+	"bin": {
+		"fsql-lsp": "dist/node/server.mjs"
+	},
+	"scripts": {
+		"build": "tsdown",
+		"check": "tsc --noEmit",
+		"start": "node dist/node/server.mjs --stdio",
+		"pretest": "run build",
+		"test": "bun test"
+	},
+	"dependencies": {
+		"vscode-languageserver": "^10.1.2",
+		"vscode-languageserver-textdocument": "^1.0.15"
+	},
+	"devDependencies": {
+		"@types/bun": "catalog:",
+		"tsdown": "catalog:",
+		"typescript": "catalog:"
+	}
+}

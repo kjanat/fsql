@@ -15,7 +15,21 @@
 		}
 	],
 	"prettier": { "allowed": false },
+	"languages": {
+		"TypeScript": {
+			"language_servers": ["typescript"] // https://github.com/kjanat/zed-typescript
+		},
+		"JavaScript": {
+			"language_servers": ["typescript"] // https://github.com/kjanat/zed-typescript
+		}
+	},
 	"lsp": {
+		"fsql": {
+			"binary": {
+				"path": "bun",
+				"arguments": ["--bun", "packages/fsql-lsp/src/server.ts", "--stdio"]
+			}
+		},
 		"json-language-server": {
 			"binary": {
 				"path": "/usr/bin/vscode-json-language-server",

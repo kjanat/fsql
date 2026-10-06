@@ -26,3 +26,5 @@ jobs:
         run: git diff --exit-code -- tree-sitter-fsql/src
       - name: Corpus/highlighting + editor queries
         run: run -s grammar:test grammar:check
+      - name: Language server types and protocol tests
+        run: run -s lsp:check lsp:test
