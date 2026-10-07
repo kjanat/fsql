@@ -4,6 +4,7 @@
 
 <!--[![Crates.io](https://img.shields.io/crates/v/fsql?logo=rust&labelColor=B7410E&color=black)](https://crates.io/crates/fsql)-->
 <!--[![NPM](https://img.shields.io/npm/v/fsql?logo=npm&labelColor=CB3837&color=black)](https://npm.im/fsql)-->
+
 [![License: MIT](https://img.shields.io/npm/l/fsql?color=blue)](./LICENSE)
 
 Query with `SELECT`, change with `DELETE`, `UPDATE` and `INSERT`.
