@@ -1,3 +1,5 @@
-corpus
-hfuzz_target
-hfuzz_workspace
+/artifacts
+/corpus
+/target
+/Cargo.lock
+/fuzz-*.log

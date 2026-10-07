@@ -18,13 +18,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { persist-credentials: false }
-      - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain
+      - parallel:
+          - uses: kjanat/runner@1f0e35b1e967fb26a2fd38667d3369d66e9d43b1 # master
+            with: { version-file: .tool-versions }
+          - uses: kjanat/setup-tombi@3d531337a5fa703aa634e6ae349a6b2be0f0e9bb # master
+            with: { version-file: .tool-versions }
+          - name: Install the pinned Rust toolchain
+            run: rustup show active-toolchain
       - name: Check formatting
-        run: cargo fmt:check
+        uses: kjanat/dprint-check@v3
       - name: Test
-        run: cargo test:2
+        run: cargo test:workspace
+      - name: Build Zed WASM adapter
+        run: cargo build:zed
       - name: Clippy
-        run: cargo clippy:2
+        run: cargo lint:workspace
       - name: Documentation
-        run: cargo doc:2
+        run: cargo check:doc

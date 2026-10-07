@@ -72,7 +72,7 @@ pub use self::ddl::{
     AlterTypeOperation, AlterTypeRename, AlterTypeRenameValue, ClusteredBy, ColumnDef,
     ColumnOption, ColumnOptionDef, ColumnOptions, ColumnPolicy, ColumnPolicyProperty,
     ConstraintCharacteristics, CreateCollation, CreateCollationDefinition, CreateConnector,
-    CreateDomain, CreateExtension, CreateFunction, CreateIndex, CreateOperator,
+    CreateDomain, CreateExtension, CreateForeignTable, CreateFunction, CreateIndex, CreateOperator,
     CreateOperatorClass, CreateOperatorFamily, CreatePolicy, CreatePolicyCommand, CreatePolicyType,
     CreateTable, CreateTextSearch, CreateTrigger, CreateView, Deduplicate, DeferrableInitial,
     DistStyle, DropBehavior, DropExtension, DropFunction, DropOperator, DropOperatorClass,
@@ -378,17 +378,24 @@ impl From<&str> for Ident {
     }
 }
 
+pub(crate) fn fmt_ident(
+    f: &mut fmt::Formatter,
+    value: &str,
+    quote_style: Option<char>,
+) -> fmt::Result {
+    match quote_style {
+        Some('[') => write!(f, "[{value}]"),
+        Some(q) => {
+            let escaped = value::escape_quoted_string(value, q);
+            write!(f, "{q}{escaped}{q}")
+        }
+        None => f.write_str(value),
+    }
+}
+
 impl fmt::Display for Ident {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.quote_style {
-            Some(q) if q == '"' || q == '\'' || q == '`' => {
-                let escaped = value::escape_quoted_string(&self.value, q);
-                write!(f, "{q}{escaped}{q}")
-            }
-            Some('[') => write!(f, "[{}]", self.value),
-            None => f.write_str(&self.value),
-            _ => panic!("unexpected quote style"),
-        }
+        fmt_ident(f, &self.value, self.quote_style)
     }
 }
 
@@ -1027,7 +1034,7 @@ pub enum Expr {
         /// Pattern expression.
         pattern: Box<Expr>,
         /// Optional escape character.
-        escape_char: Option<ValueWithSpan>,
+        escape_char: Option<Box<Expr>>,
     },
     /// `ILIKE` (case-insensitive `LIKE`)
     ILike {
@@ -1041,7 +1048,7 @@ pub enum Expr {
         /// Pattern expression.
         pattern: Box<Expr>,
         /// Optional escape character.
-        escape_char: Option<ValueWithSpan>,
+        escape_char: Option<Box<Expr>>,
     },
     /// `SIMILAR TO` regex
     SimilarTo {
@@ -1052,7 +1059,7 @@ pub enum Expr {
         /// Pattern expression.
         pattern: Box<Expr>,
         /// Optional escape character.
-        escape_char: Option<ValueWithSpan>,
+        escape_char: Option<Box<Expr>>,
     },
     /// MySQL: `RLIKE` regex or `REGEXP` regex
     RLike {
@@ -1484,9 +1491,14 @@ pub enum AccessExpr {
     Subscript(Subscript),
 }
 
+const fn is_number_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Value(v) if matches!(v.value, Value::Number(_, _)))
+}
+
 impl fmt::Display for AccessExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AccessExpr::Dot(expr) if is_number_expr(expr) => write!(f, " . {expr}"),
             AccessExpr::Dot(expr) => write!(f, ".{expr}"),
             AccessExpr::Subscript(subscript) => write!(f, "[{subscript}]"),
         }
@@ -1748,8 +1760,13 @@ impl fmt::Display for Expr {
             Expr::CompoundIdentifier(s) => write!(f, "{}", display_separated(s, ".")),
             Expr::CompoundFieldAccess { root, access_chain } => {
                 write!(f, "{root}")?;
+                let mut prev_is_number = is_number_expr(root);
                 for field in access_chain {
-                    write!(f, "{field}")?;
+                    match field {
+                        AccessExpr::Dot(expr) if prev_is_number => write!(f, " . {expr}")?,
+                        _ => write!(f, "{field}")?,
+                    }
+                    prev_is_number = matches!(field, AccessExpr::Dot(expr) if is_number_expr(expr));
                 }
                 Ok(())
             }
@@ -1952,23 +1969,39 @@ impl fmt::Display for Expr {
                     if add_parens { ")" } else { "" },
                 )
             }
-            Expr::UnaryOp { op, expr } => {
-                if op == &UnaryOperator::PGPostfixFactorial {
-                    write!(f, "{expr}{op}")
-                } else if matches!(
-                    op,
-                    UnaryOperator::Not
-                        | UnaryOperator::Hash
-                        | UnaryOperator::AtDashAt
-                        | UnaryOperator::DoubleAt
-                        | UnaryOperator::QuestionDash
-                        | UnaryOperator::QuestionPipe
-                ) {
-                    write!(f, "{op} {expr}")
-                } else {
-                    write!(f, "{op}{expr}")
+            Expr::UnaryOp { op, expr } => match op {
+                UnaryOperator::PGPostfixFactorial => {
+                    if matches!(
+                        expr.as_ref(),
+                        Expr::UnaryOp {
+                            op: UnaryOperator::PGPostfixFactorial,
+                            ..
+                        }
+                    ) {
+                        write!(f, "{expr} {op}")
+                    } else {
+                        write!(f, "{expr}{op}")
+                    }
                 }
-            }
+                UnaryOperator::Not
+                | UnaryOperator::BitwiseNot
+                | UnaryOperator::Hash
+                | UnaryOperator::AtDashAt
+                | UnaryOperator::DoubleAt
+                | UnaryOperator::PGAbs
+                | UnaryOperator::QuestionDash
+                | UnaryOperator::QuestionPipe
+                | UnaryOperator::PGSquareRoot
+                | UnaryOperator::PGCubeRoot => write!(f, "{op} {expr}"),
+                UnaryOperator::Minus | UnaryOperator::BangNot => {
+                    if starts_with_operator_char(expr) {
+                        write!(f, "{op} {expr}")
+                    } else {
+                        write!(f, "{op}{expr}")
+                    }
+                }
+                UnaryOperator::Plus | UnaryOperator::PGPrefixFactorial => write!(f, "{op}{expr}"),
+            },
             Expr::Convert {
                 is_try,
                 expr,
@@ -2003,7 +2036,11 @@ impl fmt::Display for Expr {
                 format,
             } => match kind {
                 CastKind::Cast => {
-                    write!(f, "CAST({expr} AS {data_type}")?;
+                    if matches!(data_type, DataType::Unspecified) {
+                        write!(f, "CAST({expr} AS")?;
+                    } else {
+                        write!(f, "CAST({expr} AS {data_type}")?;
+                    }
                     if let Some(format) = format {
                         write!(f, " FORMAT {format}")?;
                     }
@@ -3770,6 +3807,11 @@ pub enum Statement {
     /// A `CREATE SERVER` statement.
     CreateServer(CreateServerStatement),
     /// ```sql
+    /// CREATE FOREIGN TABLE
+    /// ```
+    /// See [PostgreSQL](https://www.postgresql.org/docs/current/sql-createforeigntable.html)
+    CreateForeignTable(CreateForeignTable),
+    /// ```sql
     /// CREATE POLICY
     /// ```
     /// See [PostgreSQL](https://www.postgresql.org/docs/current/sql-createpolicy.html)
@@ -5246,7 +5288,7 @@ impl fmt::Display for Statement {
                     local = if *local { " LOCAL" } else { "" },
                     path = path
                 )?;
-                if let Some(ref ff) = file_format {
+                if let Some(ff) = file_format {
                     write!(f, " STORED AS {ff}")?
                 }
                 write!(f, " {source}")
@@ -5547,7 +5589,7 @@ impl fmt::Display for Statement {
                     overwrite = if *overwrite { "OVERWRITE " } else { "" },
                     table_name = table_name,
                 )?;
-                if let Some(ref parts) = &partitioned {
+                if let Some(parts) = &partitioned {
                     if !parts.is_empty() {
                         write!(f, " PARTITION ({})", display_comma_separated(parts))?;
                     }
@@ -5629,6 +5671,7 @@ impl fmt::Display for Statement {
             Statement::CreateServer(stmt) => {
                 write!(f, "{stmt}")
             }
+            Statement::CreateForeignTable(stmt) => write!(f, "{stmt}"),
             Statement::CreatePolicy(policy) => write!(f, "{policy}"),
             Statement::CreateConnector(create_connector) => create_connector.fmt(f),
             Statement::CreateOperator(create_operator) => create_operator.fmt(f),
@@ -7544,34 +7587,22 @@ pub struct Grantee {
 
 impl fmt::Display for Grantee {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.grantee_type {
-            GranteesType::Role => {
-                write!(f, "ROLE ")?;
+        let keyword = match self.grantee_type {
+            GranteesType::Role => "ROLE",
+            GranteesType::Share => "SHARE",
+            GranteesType::User => "USER",
+            GranteesType::Group => "GROUP",
+            GranteesType::Public => "PUBLIC",
+            GranteesType::DatabaseRole => "DATABASE ROLE",
+            GranteesType::Application => "APPLICATION",
+            GranteesType::ApplicationRole => "APPLICATION ROLE",
+            GranteesType::None => "",
+        };
+        f.write_str(keyword)?;
+        if let Some(name) = &self.name {
+            if !keyword.is_empty() {
+                f.write_str(" ")?;
             }
-            GranteesType::Share => {
-                write!(f, "SHARE ")?;
-            }
-            GranteesType::User => {
-                write!(f, "USER ")?;
-            }
-            GranteesType::Group => {
-                write!(f, "GROUP ")?;
-            }
-            GranteesType::Public => {
-                write!(f, "PUBLIC ")?;
-            }
-            GranteesType::DatabaseRole => {
-                write!(f, "DATABASE ROLE ")?;
-            }
-            GranteesType::Application => {
-                write!(f, "APPLICATION ")?;
-            }
-            GranteesType::ApplicationRole => {
-                write!(f, "APPLICATION ROLE ")?;
-            }
-            GranteesType::None => (),
-        }
-        if let Some(ref name) = self.name {
             name.fmt(f)?;
         }
         Ok(())
@@ -8023,6 +8054,11 @@ pub enum FunctionArgOperator {
     Colon,
     /// function(arg1 VALUE value1)
     Value,
+    /// function(arg1 value1), with no operator between the name and the value,
+    /// as in PostgreSQL `XMLPARSE(DOCUMENT value)`
+    ///
+    /// [PostgreSQL](https://www.postgresql.org/docs/current/datatype-xml.html#DATATYPE-XML-CREATING)
+    Space,
 }
 
 impl fmt::Display for FunctionArgOperator {
@@ -8033,6 +8069,7 @@ impl fmt::Display for FunctionArgOperator {
             FunctionArgOperator::Assignment => f.write_str(":="),
             FunctionArgOperator::Colon => f.write_str(":"),
             FunctionArgOperator::Value => f.write_str("VALUE"),
+            FunctionArgOperator::Space => Ok(()),
         }
     }
 }
@@ -8075,14 +8112,41 @@ impl fmt::Display for FunctionArg {
                 name,
                 arg,
                 operator,
-            } => write!(f, "{name} {operator} {arg}"),
+            } => fmt_named_function_arg(f, name, operator, arg),
             FunctionArg::ExprNamed {
                 name,
                 arg,
                 operator,
-            } => write!(f, "{name} {operator} {arg}"),
+            } => fmt_named_function_arg(f, name, operator, arg),
             FunctionArg::Unnamed(unnamed_arg) => write!(f, "{unnamed_arg}"),
         }
+    }
+}
+
+/// Whether `expr` renders with an operator character first. A prefix `-` or `!`
+/// must not abut one, since `--` starts a line comment and compound tokens
+/// like `!!` or `!~` alter the parsed AST or fail to parse.
+fn starts_with_operator_char(mut expr: &Expr) -> bool {
+    loop {
+        match expr {
+            Expr::UnaryOp { op, .. } => return !matches!(op, UnaryOperator::Not),
+            Expr::BinaryOp { left, .. } => expr = left,
+            _ => return false,
+        }
+    }
+}
+
+/// `FunctionArgOperator::Space` has no token of its own, so the name and the
+/// value are separated by a single space instead.
+fn fmt_named_function_arg(
+    f: &mut fmt::Formatter,
+    name: &impl fmt::Display,
+    operator: &FunctionArgOperator,
+    arg: &FunctionArgExpr,
+) -> fmt::Result {
+    match operator {
+        FunctionArgOperator::Space => write!(f, "{name} {arg}"),
+        _ => write!(f, "{name} {operator} {arg}"),
     }
 }
 
@@ -8198,6 +8262,14 @@ pub struct Function {
     /// The arguments to the function, including any options specified within the
     /// delimiting parentheses.
     pub args: FunctionArguments,
+    /// A clause used with certain aggregate functions to control the ordering
+    /// within grouped sets before the function is applied.
+    ///
+    /// Syntax:
+    /// ```plaintext
+    /// <aggregate_function>(expression) WITHIN GROUP (ORDER BY key [ASC | DESC], ...)
+    /// ```
+    pub within_group: Vec<OrderByExpr>,
     /// e.g. `x > 5` in `COUNT(x) FILTER (WHERE x > 5)`
     pub filter: Option<Box<Expr>>,
     /// Indicates how `NULL`s should be handled in the calculation.
@@ -8211,14 +8283,6 @@ pub struct Function {
     pub null_treatment: Option<NullTreatment>,
     /// The `OVER` clause, indicating a window function call.
     pub over: Option<WindowType>,
-    /// A clause used with certain aggregate functions to control the ordering
-    /// within grouped sets before the function is applied.
-    ///
-    /// Syntax:
-    /// ```plaintext
-    /// <aggregate_function>(expression) WITHIN GROUP (ORDER BY key [ASC | DESC], ...)
-    /// ```
-    pub within_group: Vec<OrderByExpr>,
 }
 
 impl fmt::Display for Function {
@@ -9178,7 +9242,7 @@ impl fmt::Display for CreateServerStatement {
     }
 }
 
-/// A key/value option for `CREATE SERVER`.
+/// A key/value entry in a Postgres `OPTIONS ( ... )` clause.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
@@ -10642,10 +10706,7 @@ impl Display for MySQLColumnPosition {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             MySQLColumnPosition::First => write!(f, "FIRST"),
-            MySQLColumnPosition::After(ident) => {
-                let column_name = &ident.value;
-                write!(f, "AFTER {column_name}")
-            }
+            MySQLColumnPosition::After(ident) => write!(f, "AFTER {ident}"),
         }
     }
 }
@@ -12179,13 +12240,16 @@ pub enum Reset {
     /// Resets all session parameters to their default values.
     ALL,
 
+    /// Resets session authorization to the session user.
+    SessionAuthorization,
+
     /// Resets a specific session parameter to its default value.
     ConfigurationParameter(ObjectName),
 }
 
 /// Resets a session parameter to its default value.
 /// ```sql
-/// RESET { ALL | <configuration_parameter> }
+/// RESET { ALL | SESSION AUTHORIZATION | <configuration_parameter> }
 /// ```
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -12261,6 +12325,7 @@ impl fmt::Display for ResetStatement {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.reset {
             Reset::ALL => write!(f, "RESET ALL"),
+            Reset::SessionAuthorization => write!(f, "RESET SESSION AUTHORIZATION"),
             Reset::ConfigurationParameter(param) => write!(f, "RESET {}", param),
         }
     }

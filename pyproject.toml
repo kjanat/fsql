@@ -1,0 +1,6 @@
+[tool.ruff]
+exclude   = ["./vendor/**"]
+cache-dir = "/dev/null"
+
+[tool.ty]
+src.exclude = ["./vendor/**"]

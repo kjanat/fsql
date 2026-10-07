@@ -1,5 +1,6 @@
-import { optional_parenthesis } from "../helpers.js";
+import { optional_parenthesis } from "#grammar/helpers";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _merge_statement: $=> seq(

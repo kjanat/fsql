@@ -2925,3 +2925,41 @@ fn parse_mssql_money_constants() {
         expr_from_projection(only(&select.projection)),
     );
 }
+
+#[test]
+fn parse_bracket_quoted_function_argument_name() {
+    let Statement::DropFunction(drop) = ms().verified_stmt("DROP FUNCTION f([Role] INT)") else {
+        panic!("expected a DROP FUNCTION statement");
+    };
+    assert_eq!(
+        drop.func_desc[0].args,
+        Some(vec![OperateFunctionArg {
+            mode: None,
+            name: Some(Ident::with_quote('[', "Role")),
+            data_type: Int(None),
+            default_expr: None,
+        }])
+    );
+}
+
+#[test]
+fn parse_bracket_quoted_eq_alias_assignment() {
+    ms().one_statement_parses_to("SELECT a = [from] FROM t", "SELECT [from] AS a FROM t");
+}
+
+#[test]
+fn parse_create_proc() {
+    ms().one_statement_parses_to(
+        "CREATE PROC test AS BEGIN SELECT 1; END",
+        "CREATE PROCEDURE test AS BEGIN SELECT 1; END",
+    );
+    ms().one_statement_parses_to(
+        "CREATE OR ALTER PROC test AS BEGIN SELECT 1; END",
+        "CREATE OR ALTER PROCEDURE test AS BEGIN SELECT 1; END",
+    );
+
+    TestedDialects::new(vec![Box::new(GenericDialect {})])
+        .parse_sql_statements("CREATE PROC test AS BEGIN SELECT 1; END")
+        .expect_err("PROC should remain MSSQL-specific");
+    ms_and_generic().verified_stmt("SELECT proc FROM jobs");
+}

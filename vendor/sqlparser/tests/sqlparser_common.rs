@@ -74,6 +74,21 @@ fn parse_numeric_literal_underscore() {
         select.projection,
         vec![UnnamedExpr(Expr::Value(number("10_000").with_empty_span()))]
     );
+
+    for (sql, column) in [
+        ("SELECT 10__00", 10),
+        ("SELECT 10_00_", 13),
+        ("SELECT 1._000", 10),
+        ("SELECT 1_a", 9),
+        ("SELECT 1e_1", 10),
+        ("SELECT 1e1_", 11),
+    ] {
+        let err = dialects.parse_sql_statements(sql).unwrap_err();
+        assert_eq!(
+            format!("sql parser error: Unexpected character '_' at Line: 1, Column: {column}"),
+            err.to_string()
+        );
+    }
 }
 
 #[test]
@@ -1205,9 +1220,9 @@ fn parse_column_aliases() {
     let select = verified_only_select(sql);
     if let SelectItem::ExprWithAlias {
         expr: Expr::BinaryOp {
-            ref op, ref right, ..
+            op, right, ..
         },
-        ref alias,
+        alias,
     } = only(&select.projection)
     {
         assert_eq!(&BinaryOperator::Plus, op);
@@ -1985,6 +2000,197 @@ fn parse_is_not_distinct_from() {
 }
 
 #[test]
+fn parse_is_distinct_from_precedence() {
+    use self::Expr::*;
+
+    // The right operand of `IS [NOT] DISTINCT FROM` binds tighter than `AND`/`OR`,
+    // so the boolean operator must end up at the root of the tree.
+    assert_eq!(
+        BinaryOp {
+            left: Box::new(IsDistinctFrom(
+                Box::new(Identifier(Ident::new("a"))),
+                Box::new(Expr::value(number("1"))),
+            )),
+            op: BinaryOperator::And,
+            right: Box::new(BinaryOp {
+                left: Box::new(Identifier(Ident::new("b"))),
+                op: BinaryOperator::Eq,
+                right: Box::new(Expr::value(number("2"))),
+            }),
+        },
+        verified_expr("a IS DISTINCT FROM 1 AND b = 2")
+    );
+
+    assert_eq!(
+        BinaryOp {
+            left: Box::new(IsNotDistinctFrom(
+                Box::new(Identifier(Ident::new("a"))),
+                Box::new(Expr::value(number("1"))),
+            )),
+            op: BinaryOperator::Or,
+            right: Box::new(BinaryOp {
+                left: Box::new(Identifier(Ident::new("b"))),
+                op: BinaryOperator::Eq,
+                right: Box::new(Expr::value(number("2"))),
+            }),
+        },
+        verified_expr("a IS NOT DISTINCT FROM 1 OR b = 2")
+    );
+
+    // `AND` binds tighter than `OR` within the surrounding expression.
+    assert_eq!(
+        BinaryOp {
+            left: Box::new(BinaryOp {
+                left: Box::new(IsDistinctFrom(
+                    Box::new(Identifier(Ident::new("a"))),
+                    Box::new(Expr::value(number("1"))),
+                )),
+                op: BinaryOperator::And,
+                right: Box::new(Identifier(Ident::new("b"))),
+            }),
+            op: BinaryOperator::Or,
+            right: Box::new(Identifier(Ident::new("c"))),
+        },
+        verified_expr("a IS DISTINCT FROM 1 AND b OR c")
+    );
+    assert_eq!(
+        BinaryOp {
+            left: Box::new(IsDistinctFrom(
+                Box::new(Identifier(Ident::new("a"))),
+                Box::new(Expr::value(number("1"))),
+            )),
+            op: BinaryOperator::Or,
+            right: Box::new(BinaryOp {
+                left: Box::new(Identifier(Ident::new("b"))),
+                op: BinaryOperator::And,
+                right: Box::new(Identifier(Ident::new("c"))),
+            }),
+        },
+        verified_expr("a IS DISTINCT FROM 1 OR b AND c")
+    );
+
+    // Explicit parentheses still push the boolean expression into the right operand.
+    assert_eq!(
+        IsDistinctFrom(
+            Box::new(Identifier(Ident::new("a"))),
+            Box::new(Nested(Box::new(BinaryOp {
+                left: Box::new(Expr::value(number("1"))),
+                op: BinaryOperator::And,
+                right: Box::new(Identifier(Ident::new("b"))),
+            }))),
+        ),
+        verified_expr("a IS DISTINCT FROM (1 AND b)")
+    );
+
+    // sqlparser resolves the IS family left-associatively, consistent with how
+    // `a IS NULL IS NULL` already parses. Deliberately more permissive than
+    // PostgreSQL, which declares IS as %nonassoc and rejects the chain.
+    assert_eq!(
+        IsNull(Box::new(IsDistinctFrom(
+            Box::new(Identifier(Ident::new("a"))),
+            Box::new(Identifier(Ident::new("b"))),
+        ))),
+        verified_expr("a IS DISTINCT FROM b IS NULL")
+    );
+
+    // Operators that bind tighter than `IS` are still part of the right operand.
+    assert_eq!(
+        IsDistinctFrom(
+            Box::new(Identifier(Ident::new("a"))),
+            Box::new(BinaryOp {
+                left: Box::new(Identifier(Ident::new("b"))),
+                op: BinaryOperator::Plus,
+                right: Box::new(Expr::value(number("1"))),
+            }),
+        ),
+        verified_expr("a IS DISTINCT FROM b + 1")
+    );
+
+    assert_eq!(
+        IsDistinctFrom(
+            Box::new(Identifier(Ident::new("a"))),
+            Box::new(BinaryOp {
+                left: Box::new(Identifier(Ident::new("b"))),
+                op: BinaryOperator::Eq,
+                right: Box::new(Identifier(Ident::new("c"))),
+            }),
+        ),
+        verified_expr("a IS DISTINCT FROM b = c")
+    );
+
+    // `NOT` binds more loosely than `IS`, so it applies to the whole comparison.
+    assert_eq!(
+        UnaryOp {
+            op: UnaryOperator::Not,
+            expr: Box::new(IsDistinctFrom(
+                Box::new(Identifier(Ident::new("a"))),
+                Box::new(Identifier(Ident::new("b"))),
+            )),
+        },
+        verified_expr("NOT a IS DISTINCT FROM b")
+    );
+
+    assert_eq!(
+        BinaryOp {
+            left: Box::new(IsNotDistinctFrom(
+                Box::new(Identifier(Ident::new("a"))),
+                Box::new(Identifier(Ident::new("b"))),
+            )),
+            op: BinaryOperator::And,
+            right: Box::new(IsNotDistinctFrom(
+                Box::new(Identifier(Ident::new("c"))),
+                Box::new(Identifier(Ident::new("d"))),
+            )),
+        },
+        verified_expr("a IS NOT DISTINCT FROM b AND c IS NOT DISTINCT FROM d")
+    );
+}
+
+#[test]
+fn parse_pg_other_operator_precedence() {
+    let arrow_k = |left: Expr| Expr::BinaryOp {
+        left: Box::new(left),
+        op: BinaryOperator::Arrow,
+        right: Box::new(Expr::Value(
+            Value::SingleQuotedString("k".into()).with_empty_span(),
+        )),
+    };
+    let t_a = || Expr::CompoundIdentifier(vec![Ident::new("t"), Ident::new("a")]);
+
+    // `->` binds tighter than comparison operators, so the arrow expression is
+    // the left operand rather than the comparison being the arrow's key.
+    let expected_eq = |left: Expr| Expr::BinaryOp {
+        left: Box::new(arrow_k(left)),
+        op: BinaryOperator::Eq,
+        right: Box::new(Identifier(Ident::new("b"))),
+    };
+
+    // Dialects with lambda functions read a bare `a ->` as the start of a lambda.
+    assert_eq!(
+        expected_eq(Identifier(Ident::new("a"))),
+        all_dialects_where(|d| !d.supports_lambda_functions()).verified_expr("a -> 'k' = b")
+    );
+    assert_eq!(
+        expected_eq(t_a()),
+        all_dialects().verified_expr("t.a -> 'k' = b")
+    );
+
+    // `LIKE` sits below `=` in the precedence table, so cover that boundary too.
+    assert_eq!(
+        Expr::Like {
+            negated: false,
+            any: false,
+            expr: Box::new(arrow_k(t_a())),
+            pattern: Box::new(Expr::Value(
+                Value::SingleQuotedString("x".into()).with_empty_span(),
+            )),
+            escape_char: None,
+        },
+        all_dialects().verified_expr("t.a -> 'k' LIKE 'x'")
+    );
+}
+
+#[test]
 fn parse_not_precedence() {
     // NOT has higher precedence than OR/AND, so the following must parse as (NOT true) OR true
     let sql = "NOT 1 OR 1";
@@ -2135,7 +2341,9 @@ fn parse_ilike() {
                 pattern: Box::new(Expr::Value(
                     (Value::SingleQuotedString("%a".to_string())).with_empty_span()
                 )),
-                escape_char: Some(Value::SingleQuotedString('^'.to_string()).with_empty_span()),
+                escape_char: Some(Box::new(Expr::value(
+                    Value::SingleQuotedString('^'.to_string()).with_empty_span(),
+                ))),
                 any: false,
             },
             select.selection.unwrap()
@@ -2199,7 +2407,9 @@ fn parse_like() {
                 pattern: Box::new(Expr::Value(
                     (Value::SingleQuotedString("%a".to_string())).with_empty_span()
                 )),
-                escape_char: Some(Value::SingleQuotedString('^'.to_string()).with_empty_span()),
+                escape_char: Some(Box::new(Expr::value(
+                    Value::SingleQuotedString('^'.to_string()).with_empty_span(),
+                ))),
                 any: false,
             },
             select.selection.unwrap()
@@ -2227,6 +2437,11 @@ fn parse_like() {
     }
     chk(false);
     chk(true);
+}
+
+#[test]
+fn parse_like_escape_expression() {
+    verified_expr("'a%' LIKE 'a#%' ESCAPE ('' || '#')");
 }
 
 #[test]
@@ -2262,7 +2477,9 @@ fn parse_similar_to() {
                 pattern: Box::new(Expr::Value(
                     (Value::SingleQuotedString("%a".to_string())).with_empty_span()
                 )),
-                escape_char: Some(Value::SingleQuotedString('^'.to_string()).with_empty_span()),
+                escape_char: Some(Box::new(Expr::value(
+                    Value::SingleQuotedString('^'.to_string()).with_empty_span(),
+                ))),
             },
             select.selection.unwrap()
         );
@@ -2279,7 +2496,7 @@ fn parse_similar_to() {
                 pattern: Box::new(Expr::Value(
                     (Value::SingleQuotedString("%a".to_string())).with_empty_span()
                 )),
-                escape_char: Some(Value::Null.with_empty_span()),
+                escape_char: Some(Box::new(Expr::value(Value::Null.with_empty_span()))),
             },
             select.selection.unwrap()
         );
@@ -2297,7 +2514,9 @@ fn parse_similar_to() {
                 pattern: Box::new(Expr::Value(
                     (Value::SingleQuotedString("%a".to_string())).with_empty_span()
                 )),
-                escape_char: Some(Value::SingleQuotedString('^'.to_string()).with_empty_span()),
+                escape_char: Some(Box::new(Expr::value(
+                    Value::SingleQuotedString('^'.to_string()).with_empty_span(),
+                ))),
             })),
             select.selection.unwrap()
         );
@@ -3584,7 +3803,8 @@ fn parse_listagg() {
     verified_stmt("SELECT LISTAGG(dateid)");
     verified_stmt("SELECT LISTAGG(DISTINCT dateid)");
     verified_stmt("SELECT LISTAGG(dateid ON OVERFLOW ERROR)");
-    verified_stmt("SELECT LISTAGG(dateid ON OVERFLOW TRUNCATE N'...' WITH COUNT)");
+    all_dialects_where(|d| d.supports_national_string_literal())
+        .verified_stmt("SELECT LISTAGG(dateid ON OVERFLOW TRUNCATE N'...' WITH COUNT)");
     verified_stmt("SELECT LISTAGG(dateid ON OVERFLOW TRUNCATE X'deadbeef' WITH COUNT)");
 }
 
@@ -3983,6 +4203,7 @@ fn parse_create_table() {
                                 option: ColumnOption::Check(CheckConstraint {
                                     name: None,
                                     expr: Box::new(verified_expr("constrained > 0")),
+                                    no_inherit: false,
                                     enforced: None,
                                 }),
                             },
@@ -4628,7 +4849,7 @@ fn parse_create_table_as_table() {
     let expected_query1 = Box::new(Query {
         with: None,
         body: Box::new(SetExpr::Table(Box::new(Table {
-            table_name: Some("old_table".to_string()),
+            table_name: Some(Ident::new("old_table")),
             schema_name: None,
         }))),
         order_by: None,
@@ -4654,8 +4875,8 @@ fn parse_create_table_as_table() {
     let expected_query2 = Box::new(Query {
         with: None,
         body: Box::new(SetExpr::Table(Box::new(Table {
-            table_name: Some("old_table".to_string()),
-            schema_name: Some("schema_name".to_string()),
+            table_name: Some(Ident::new("old_table")),
+            schema_name: Some(Ident::new("schema_name")),
         }))),
         order_by: None,
         limit_clause: None,
@@ -6232,8 +6453,9 @@ fn parse_literal_decimal() {
 
 #[test]
 fn parse_literal_string() {
+    let national_string_dialects = all_dialects_where(|d| d.supports_national_string_literal());
     let sql = "SELECT 'one', N'national string', X'deadBEEF'";
-    let select = verified_only_select(sql);
+    let select = national_string_dialects.verified_only_select(sql);
     assert_eq!(3, select.projection.len());
     assert_eq!(
         &Expr::Value((Value::SingleQuotedString("one".to_string())).with_empty_span()),
@@ -6250,9 +6472,10 @@ fn parse_literal_string() {
         expr_from_projection(&select.projection[2])
     );
 
-    one_statement_parses_to("SELECT x'deadBEEF'", "SELECT X'deadBEEF'");
-    one_statement_parses_to("SELECT n'national string'", "SELECT N'national string'");
-    one_statement_parses_to(
+    all_dialects().one_statement_parses_to("SELECT x'deadBEEF'", "SELECT X'deadBEEF'");
+    national_string_dialects
+        .one_statement_parses_to("SELECT n'national string'", "SELECT N'national string'");
+    national_string_dialects.one_statement_parses_to(
         r#"SELECT n'Tu geres '';'' et ''"'' ?'"#,
         r#"SELECT N'Tu geres '';'' et ''"'' ?'"#,
     );
@@ -7941,7 +8164,7 @@ fn parse_ctes() {
     let sql = &format!("SELECT ({with})");
     let select = verified_only_select(sql);
     match expr_from_projection(only(&select.projection)) {
-        Expr::Subquery(ref subquery) => {
+        Expr::Subquery(subquery) => {
             assert_ctes_in_select(&cte_sqls, subquery.as_ref());
         }
         _ => panic!("Expected: subquery"),
@@ -8308,12 +8531,23 @@ fn parse_trim() {
         expr_from_projection(only(&select.projection))
     );
 
+    dialects.one_statement_parses_to(
+        "SELECT TRIM(BOTH FROM 'yxTomxx', 'xyz')",
+        "SELECT TRIM(BOTH 'yxTomxx', 'xyz')",
+    );
+
     // dialects without comma-style TRIM syntax should fail
     let unsupported_dialects = all_dialects_where(|d| !d.supports_comma_separated_trim());
     assert_eq!(
         ParserError::ParserError("Expected: ), found: ,".to_owned()),
         unsupported_dialects
             .parse_sql_statements("SELECT TRIM('xyz', 'a')")
+            .unwrap_err()
+    );
+    assert_eq!(
+        ParserError::ParserError("Expected: ), found: 'xyz'".to_owned()),
+        unsupported_dialects
+            .parse_sql_statements("SELECT TRIM(FROM 'xyz')")
             .unwrap_err()
     );
 }
@@ -10042,6 +10276,10 @@ fn parse_grant() {
     verified_stmt("GRANT OWNERSHIP ON ALL TABLES IN SCHEMA DEV_STAS_ROGOZHIN TO ROLE ANALYST");
     verified_stmt("GRANT OWNERSHIP ON ALL TABLES IN SCHEMA DEV_STAS_ROGOZHIN TO ROLE ANALYST COPY CURRENT GRANTS");
     verified_stmt("GRANT OWNERSHIP ON ALL TABLES IN SCHEMA DEV_STAS_ROGOZHIN TO ROLE ANALYST REVOKE CURRENT GRANTS");
+    // Printing these the other way round yields output the parser rejects.
+    verified_stmt(
+        "GRANT OWNERSHIP ON ALL TABLES IN SCHEMA s TO ROLE r WITH GRANT OPTION COPY CURRENT GRANTS",
+    );
     verified_stmt("GRANT USAGE ON DATABASE db1 TO ROLE role1");
     verified_stmt("GRANT USAGE ON WAREHOUSE wh1 TO ROLE role1");
     verified_stmt("GRANT OWNERSHIP ON INTEGRATION int1 TO ROLE role1");
@@ -10061,6 +10299,9 @@ fn parse_grant() {
     verified_stmt("GRANT ROLE role1 TO ROLE role2");
     verified_stmt("GRANT ROLE role1 TO USER user");
     verified_stmt("GRANT CREATE SCHEMA ON DATABASE db1 TO ROLE role1");
+    // PUBLIC takes no name, so it must not trail a space. MsSql reserves it as
+    // an ordinary grantee name.
+    all_dialects_except(|d| d.is::<MsSqlDialect>()).verified_stmt("GRANT SELECT ON t TO PUBLIC");
 }
 
 #[test]
@@ -10096,6 +10337,7 @@ fn test_revoke() {
     let sql = "REVOKE ALL PRIVILEGES ON users, auth FROM analyst";
     match verified_stmt(sql) {
         Statement::Revoke(Revoke {
+            grant_option_for: false,
             privileges,
             objects: Some(GrantObjects::Tables(tables)),
             grantees,
@@ -10120,8 +10362,9 @@ fn test_revoke() {
 #[test]
 fn test_revoke_with_cascade() {
     let sql = "REVOKE ALL PRIVILEGES ON users, auth FROM analyst CASCADE";
-    match all_dialects_except(|d| d.is::<MySqlDialect>()).verified_stmt(sql) {
+    match verified_stmt(sql) {
         Statement::Revoke(Revoke {
+            grant_option_for: false,
             privileges,
             objects: Some(GrantObjects::Tables(tables)),
             grantees,
@@ -10141,6 +10384,26 @@ fn test_revoke_with_cascade() {
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn test_revoke_grant_option_for() {
+    let Statement::Revoke(mut revoke) = verified_stmt("REVOKE GRANT OPTION FOR SELECT ON t FROM r")
+    else {
+        unreachable!()
+    };
+    assert!(revoke.grant_option_for);
+
+    // Clearing the flag must yield exactly the plain revoke.
+    revoke.grant_option_for = false;
+    assert_eq!(
+        Statement::Revoke(revoke),
+        verified_stmt("REVOKE SELECT ON t FROM r")
+    );
+
+    verified_stmt("REVOKE GRANT OPTION FOR ALL ON t FROM r");
+    verified_stmt("REVOKE GRANT OPTION FOR SELECT ON t FROM r CASCADE");
+    verified_stmt("REVOKE GRANT OPTION FOR SELECT ON t FROM r RESTRICT");
 }
 
 #[test]
@@ -11410,6 +11673,38 @@ fn parse_deeply_nested_subquery_expr_hits_recursion_limits() {
 
     let where_clause = make_where_clause(100);
     let sql = format!("SELECT id, user_id where id IN (select id from t WHERE {where_clause})");
+
+    let res = Parser::new(&dialect)
+        .try_with_sql(&sql)
+        .expect("tokenize to work")
+        .parse_statements();
+
+    assert_eq!(res, Err(ParserError::RecursionLimitExceeded));
+}
+
+#[test]
+fn parse_deeply_nested_interval_hits_recursion_limits() {
+    let dialect = GenericDialect {};
+
+    let sql = format!("SELECT {}1", "INTERVAL ".repeat(1000));
+
+    let res = Parser::new(&dialect)
+        .try_with_sql(&sql)
+        .expect("tokenize to work")
+        .parse_statements();
+
+    assert_eq!(res, Err(ParserError::RecursionLimitExceeded));
+}
+
+#[test]
+fn parse_deeply_nested_data_type_hits_recursion_limits() {
+    let dialect = GenericDialect {};
+
+    let sql = format!(
+        "SELECT CAST(x AS {}INT64{})",
+        "ARRAY<".repeat(1000),
+        ">".repeat(1000)
+    );
 
     let res = Parser::new(&dialect)
         .try_with_sql(&sql)
@@ -13667,17 +13962,44 @@ fn test_match_recognize_patterns() {
         ]),
     );
 
-    // double repetition
+    // reluctant repetition
     check(
         "S2*?",
         Repetition(
-            Box::new(Repetition(
-                Box::new(Symbol(Named(Ident::new("S2")))),
-                ZeroOrMore,
-            )),
-            AtMostOne,
+            Box::new(Symbol(Named(Ident::new("S2")))),
+            Reluctant(Box::new(ZeroOrMore)),
         ),
     );
+
+    check(
+        "S1+? S2?? S3{2,4}?",
+        Concat(vec![
+            Repetition(
+                Box::new(Symbol(Named(Ident::new("S1")))),
+                Reluctant(Box::new(OneOrMore)),
+            ),
+            Repetition(
+                Box::new(Symbol(Named(Ident::new("S2")))),
+                Reluctant(Box::new(AtMostOne)),
+            ),
+            Repetition(
+                Box::new(Symbol(Named(Ident::new("S3")))),
+                Reluctant(Box::new(Range(2, 4))),
+            ),
+        ]),
+    );
+
+    for pattern in ["S1**", "S1+++", "S1???", "S1{2,4}+"] {
+        let sql = format!(
+            "SELECT * FROM my_table MATCH_RECOGNIZE(PATTERN ({pattern}) DEFINE DUMMY AS 1 = 1)"
+        );
+        assert!(
+            all_dialects_where(|d| d.supports_match_recognize())
+                .parse_sql_statements(&sql)
+                .is_err(),
+            "stacked quantifier should fail: {pattern}"
+        );
+    }
 
     // range quantifiers in an alternation
     check(
@@ -13719,11 +14041,8 @@ fn test_match_recognize_patterns() {
                 Symbol(Start),
                 Symbol(Named(Ident::new("S1"))),
                 Repetition(
-                    Box::new(Repetition(
-                        Box::new(Symbol(Named(Ident::new("S2")))),
-                        ZeroOrMore,
-                    )),
-                    AtMostOne,
+                    Box::new(Symbol(Named(Ident::new("S2")))),
+                    Reluctant(Box::new(ZeroOrMore)),
                 ),
                 Repetition(
                     Box::new(Group(Box::new(Concat(vec![
@@ -14950,6 +15269,24 @@ fn test_alias_equal_expr() {
     let sql = r#"SELECT some_alias = (a*b) FROM some_table"#;
     let expected = r#"SELECT (a * b) AS some_alias FROM some_table"#;
     let _ = dialects.one_statement_parses_to(sql, expected);
+
+    let sql = r#"SELECT some_alias = "from" FROM some_table"#;
+    let expected = r#"SELECT "from" AS some_alias FROM some_table"#;
+    let _ = dialects.one_statement_parses_to(sql, expected);
+
+    assert_eq!(
+        dialects
+            .parse_sql_statements("SELECT a = FROM")
+            .unwrap_err(),
+        ParserError::ParserError("Expected an expression, found: FROM".to_string())
+    );
+
+    assert_eq!(
+        dialects
+            .parse_sql_statements("SELECT a = FROM some_table")
+            .unwrap_err(),
+        ParserError::ParserError("Expected an expression, found: FROM".to_string())
+    );
 
     let dialects = all_dialects_where(|d| !d.supports_eq_alias_assignment());
     let sql = r#"SELECT x = (a * b) FROM some_table"#;
@@ -17304,7 +17641,7 @@ fn parse_pipeline_operator_negative_tests() {
 
     // Test that CALL with invalid function syntax fails
     assert!(dialects
-        .parse_sql_statements("SELECT * FROM users |> CALL 123invalid")
+        .parse_sql_statements("SELECT * FROM users |> CALL 123 invalid")
         .is_err());
 
     // Test that CALL with malformed arguments fails
@@ -17563,6 +17900,19 @@ fn column_check_enforced() {
     all_dialects().verified_stmt(
         "CREATE TABLE t (a INT CHECK (a > 0) NOT ENFORCED, b INT CHECK (b > 0) ENFORCED, c INT CHECK (c > 0))",
     );
+}
+
+#[test]
+fn table_check_no_inherit() {
+    all_dialects().verified_stmt("CREATE TABLE t (a INT, CONSTRAINT c CHECK (a > 0) NO INHERIT)");
+    all_dialects().verified_stmt("CREATE TABLE t (a INT, CHECK (a > 0) NO INHERIT)");
+    all_dialects().verified_stmt("CREATE TABLE t (a INT, CHECK (a > 0) NO INHERIT NOT ENFORCED)");
+}
+
+#[test]
+fn column_check_no_inherit() {
+    all_dialects().verified_stmt("CREATE TABLE t (x INT CHECK (x > 1) NO INHERIT)");
+    all_dialects().verified_stmt("CREATE TABLE t (x INT CHECK (x > 1) NO INHERIT NOT ENFORCED)");
 }
 
 #[test]
@@ -19175,11 +19525,7 @@ fn test_parse_alter_user() {
 
 #[test]
 fn parse_generic_unary_ops() {
-    let unary_ops = &[
-        ("~", UnaryOperator::BitwiseNot),
-        ("-", UnaryOperator::Minus),
-        ("+", UnaryOperator::Plus),
-    ];
+    let unary_ops = &[("-", UnaryOperator::Minus), ("+", UnaryOperator::Plus)];
     for (str_op, op) in unary_ops {
         let select = verified_only_select(&format!("SELECT {}expr", str_op));
         assert_eq!(
@@ -19190,6 +19536,16 @@ fn parse_generic_unary_ops() {
             select.projection[0]
         );
     }
+
+    let select = verified_only_select("SELECT ~ expr");
+    assert_eq!(
+        UnnamedExpr(UnaryOp {
+            op: UnaryOperator::BitwiseNot,
+            expr: Box::new(Identifier(Ident::new("expr"))),
+        }),
+        select.projection[0]
+    );
+    one_statement_parses_to("SELECT ~expr", "SELECT ~ expr");
 }
 
 #[test]
@@ -19211,6 +19567,12 @@ fn parse_reset_statement() {
     }
     match verified_stmt("RESET ALL") {
         Statement::Reset(ResetStatement { reset }) => assert_eq!(reset, Reset::ALL),
+        _ => unreachable!(),
+    }
+    match verified_stmt("RESET SESSION AUTHORIZATION") {
+        Statement::Reset(ResetStatement { reset }) => {
+            assert_eq!(reset, Reset::SessionAuthorization)
+        }
         _ => unreachable!(),
     }
 }
@@ -19487,6 +19849,56 @@ fn parse_aliased_function_args() {
         .is_err());
 }
 
+#[test]
+fn parse_xmlparse() {
+    let dialects = all_dialects_where(|d| d.supports_xml_expressions());
+
+    for (sql, mode) in [
+        ("SELECT xmlparse(content '<a/>')", "content"),
+        ("SELECT xmlparse(document '<a/>')", "document"),
+    ] {
+        let select = dialects.verified_only_select(sql);
+        match expr_from_projection(&select.projection[0]) {
+            Expr::Function(Function {
+                name,
+                args: FunctionArguments::List(list),
+                ..
+            }) => {
+                assert_eq!(name.to_string(), "xmlparse");
+                assert_eq!(
+                    list.args,
+                    vec![FunctionArg::Named {
+                        name: Ident::new(mode),
+                        arg: FunctionArgExpr::Expr(Expr::Value(
+                            Value::SingleQuotedString("<a/>".to_string()).into()
+                        )),
+                        operator: FunctionArgOperator::Space,
+                    }]
+                );
+            }
+            expr => panic!("expected an XMLPARSE function call, got {expr:?}"),
+        }
+    }
+
+    // XMLPARSE needs both a mode word and a value.
+    assert!(dialects
+        .parse_sql_statements("SELECT xmlparse('<a/>')")
+        .is_err());
+
+    // Going through the ordinary function-call path, XMLPARSE accepts the same
+    // trailing clauses as any other function.
+    dialects.verified_stmt("SELECT xmlparse(document x) FILTER (WHERE y > 1)");
+    dialects.verified_stmt("SELECT xmlparse(document x) OVER (PARTITION BY y)");
+
+    // On dialects without XML support, `xmlparse` stays a regular function
+    // and the special `CONTENT <expr>` syntax is rejected.
+    let others = all_dialects_except(|d| d.supports_xml_expressions());
+    others.verified_only_select("SELECT xmlparse(1)");
+    assert!(others
+        .parse_sql_statements("SELECT xmlparse(content '<a/>')")
+        .is_err());
+}
+
 /// Regression test for the 2^N parse-time blowup in `parse_compound_expr` on
 /// inputs like `IF a0.a1...aN.#`. The parse is run on a worker thread and the
 /// main thread asserts that it reports back within a generous timeout. Post-fix
@@ -19664,4 +20076,360 @@ fn parse_function_arg_call_chain_no_exponential_blowup() {
 
     rx.recv_timeout(Duration::from_secs(5))
         .expect("parser should reject this quickly, not loop exponentially");
+}
+
+#[test]
+fn parse_insert_by_name() {
+    verified_stmt("INSERT INTO target BY NAME SELECT 1 AS a");
+
+    match verified_stmt("INSERT INTO target (a) BY NAME SELECT 1 AS a") {
+        Statement::Insert(Insert {
+            by_name, columns, ..
+        }) => {
+            assert!(by_name);
+            assert_eq!(columns.len(), 1);
+        }
+        _ => unreachable!(),
+    }
+
+    let dialects = all_dialects_where(|d| !d.supports_insert_table_alias());
+    match dialects.verified_stmt("INSERT INTO TABLE target PARTITION (p = 1) BY NAME SELECT 1 AS a")
+    {
+        Statement::Insert(Insert {
+            by_name,
+            has_table_keyword,
+            partitioned,
+            ..
+        }) => {
+            assert!(by_name);
+            assert!(has_table_keyword);
+            assert_eq!(partitioned.unwrap().len(), 1);
+        }
+        _ => unreachable!(),
+    }
+
+    // `BY NAME` does not shadow a table alias in dialects supporting one.
+    let dialects = all_dialects_where(|d| d.supports_insert_table_alias());
+    match dialects.verified_stmt("INSERT INTO target AS t BY NAME SELECT 1 AS a") {
+        Statement::Insert(Insert {
+            by_name,
+            table_alias,
+            ..
+        }) => {
+            assert!(by_name);
+            assert_eq!(table_alias.unwrap().alias.value, "t");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn parse_bitwise_not_renders_apart_from_operand() {
+    all_dialects().verified_stmt("SELECT ~ -1");
+    all_dialects().verified_stmt("SELECT ~ ~ 1");
+}
+
+#[test]
+fn parse_unary_minus_never_renders_line_comment() {
+    all_dialects().verified_stmt("SELECT - -1");
+    all_dialects().verified_stmt("SELECT - - -1");
+    all_dialects().verified_stmt("SELECT -1");
+    all_dialects().verified_stmt("SELECT -x");
+}
+
+#[test]
+fn parse_table_preserves_quotes_and_trailing_tokens() {
+    let dialects = TestedDialects::new(vec![
+        Box::new(AnsiDialect {}),
+        Box::new(GenericDialect {}),
+        Box::new(PostgreSqlDialect {}),
+        Box::new(DuckDbDialect {}),
+        Box::new(SnowflakeDialect {}),
+    ]);
+    dialects.verified_stmt(r#"CREATE TABLE new_table AS TABLE "old_table""#);
+    dialects.verified_stmt(r#"CREATE TABLE new_table AS TABLE "schema_name"."old_table""#);
+    dialects.verified_stmt("CREATE TABLE new_table AS TABLE old_table ORDER BY x");
+    dialects.verified_stmt("CREATE TABLE new_table AS TABLE old_table LIMIT 10");
+    dialects.verified_stmt("SELECT * FROM (TABLE old_table ORDER BY x)");
+
+    let backtick_dialects = TestedDialects::new(vec![
+        Box::new(AnsiDialect {}),
+        Box::new(GenericDialect {}),
+        Box::new(MySqlDialect {}),
+    ]);
+    backtick_dialects.verified_stmt("CREATE TABLE new_table AS TABLE `old_table`");
+    backtick_dialects.verified_stmt("CREATE TABLE new_table AS TABLE `%mpty`");
+    backtick_dialects.verified_stmt("INSERT INTO t TABLE `%mpty`");
+
+    let err = dialects
+        .parse_sql_statements("CREATE TABLE new_table AS TABLE %mpty")
+        .unwrap_err();
+    assert_eq!(
+        ParserError::ParserError("Expected: identifier, found: %".to_string()),
+        err
+    );
+
+    let err = backtick_dialects
+        .parse_sql_statements("CREATE TABLE new_table AS TABLE `x` ORE")
+        .unwrap_err();
+    assert_eq!(
+        ParserError::ParserError("Expected: end of statement, found: ORE".to_string()),
+        err
+    );
+}
+
+#[test]
+fn parse_hex_string_literal_display_escaping() {
+    all_dialects().verified_stmt("SELECT X''''");
+    all_dialects().verified_stmt("SELECT X'ab''cd'");
+    all_dialects().one_statement_parses_to("SELECT x'''' N", "SELECT X'''' AS N");
+}
+
+#[test]
+fn parse_stage_table_factor() {
+    let supported = all_dialects_where(|d| d.supports_stages());
+    supported.verified_stmt("SELECT * FROM @stage");
+    supported.verified_stmt("SELECT * FROM @stage, my_table");
+
+    let unsupported = all_dialects_where(|d| !d.supports_stages() && !d.is_identifier_start('@'));
+    assert_eq!(
+        unsupported
+            .parse_sql_statements("SELECT * FROM @stage")
+            .unwrap_err(),
+        ParserError::ParserError("Expected: identifier, found: @".to_string()),
+    );
+}
+
+#[test]
+fn parse_alter_table_column_position() {
+    let dialects = all_dialects_where(|d| d.supports_alter_column_position());
+    match alter_table_op(dialects.verified_stmt("ALTER TABLE tab ADD COLUMN c INT FIRST")) {
+        AlterTableOperation::AddColumn {
+            column_position, ..
+        } => assert_eq!(column_position, Some(MySQLColumnPosition::First)),
+        _ => unreachable!(),
+    }
+    match alter_table_op(dialects.verified_stmt("ALTER TABLE tab ADD COLUMN c INT AFTER b")) {
+        AlterTableOperation::AddColumn {
+            column_position, ..
+        } => assert_eq!(
+            column_position,
+            Some(MySQLColumnPosition::After(Ident::new("b")))
+        ),
+        _ => unreachable!(),
+    }
+    match alter_table_op(dialects.verified_stmt("ALTER TABLE tab MODIFY COLUMN c INT AFTER b")) {
+        AlterTableOperation::ModifyColumn {
+            column_position, ..
+        } => assert_eq!(
+            column_position,
+            Some(MySQLColumnPosition::After(Ident::new("b")))
+        ),
+        _ => unreachable!(),
+    }
+    assert!(dialects
+        .parse_sql_statements("ALTER TABLE tab ADD COLUMN c INT AFTER")
+        .is_err());
+
+    let dialects = all_dialects_where(|d| !d.supports_alter_column_position());
+    for sql in [
+        "ALTER TABLE tab ADD COLUMN c INT FIRST",
+        "ALTER TABLE tab ADD COLUMN c INT AFTER b",
+    ] {
+        assert!(dialects.parse_sql_statements(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn parse_compound_field_access_numeric_display() {
+    all_dialects().verified_stmt("SELECT 1 . i");
+    all_dialects().verified_stmt("SELECT (1 . i)");
+    all_dialects().verified_stmt("SELECT 1 . 2");
+    all_dialects().verified_stmt("SELECT (a . 1 . b)");
+    all_dialects().verified_stmt("SELECT 1 . i.j");
+    all_dialects().verified_stmt("SELECT 1 . 2 . 3");
+    all_dialects().verified_stmt("SELECT a.b.c");
+
+    let err = all_dialects_where(|d| !d.supports_numeric_prefix())
+        .parse_sql_statements("SELECT (1.i)")
+        .unwrap_err();
+    assert_eq!(
+        err,
+        ParserError::ParserError("Expected: ), found: i".to_string())
+    );
+}
+
+#[test]
+fn parse_placeholder_disallows_quoted_ident() {
+    let dialects = TestedDialects::new(vec![
+        Box::new(AnsiDialect {}),
+        Box::new(GenericDialect {}),
+        Box::new(SnowflakeDialect {}),
+        Box::new(SQLiteDialect {}),
+    ]);
+    // Valid placeholders roundtrip
+    dialects.verified_stmt("SELECT :x");
+
+    // Quoted identifiers are not valid placeholders
+    let err = dialects.parse_sql_statements("SELECT :`a`").unwrap_err();
+    assert_eq!(
+        ParserError::ParserError("Expected: placeholder, found: `a`".to_string()),
+        err
+    );
+    let err = dialects.parse_sql_statements("SELECT :\"a\"").unwrap_err();
+    assert_eq!(
+        ParserError::ParserError("Expected: placeholder, found: \"a\"".to_string()),
+        err
+    );
+    let err = dialects.parse_sql_statements("SELECT:` a` a").unwrap_err();
+    assert_eq!(
+        ParserError::ParserError("Expected: placeholder, found: ` a`".to_string()),
+        err
+    );
+
+    let ansi = TestedDialects::new(vec![Box::new(AnsiDialect {})]);
+    ansi.verified_stmt("SELECT @x");
+    let err = ansi.parse_sql_statements("SELECT @`a`").unwrap_err();
+    assert_eq!(
+        ParserError::ParserError("Expected: placeholder, found: `a`".to_string()),
+        err
+    );
+    let err = ansi.parse_sql_statements("SELECT @\"a\"").unwrap_err();
+    assert_eq!(
+        ParserError::ParserError("Expected: placeholder, found: \"a\"".to_string()),
+        err
+    );
+}
+
+#[test]
+fn parse_in_list_leading_subquery() {
+    let x = || Box::new(Expr::Identifier(Ident::new("x")));
+    let subquery = || Expr::Subquery(Box::new(verified_query("SELECT a FROM u")));
+
+    let select = verified_only_select("SELECT * FROM t WHERE x IN ((SELECT a FROM u), 1)");
+    assert_eq!(
+        Expr::InList {
+            expr: x(),
+            list: vec![subquery(), Expr::value(number("1"))],
+            negated: false,
+        },
+        select.selection.unwrap()
+    );
+
+    let select = verified_only_select("SELECT * FROM t WHERE x NOT IN (((SELECT a FROM u)), 1)");
+    assert_eq!(
+        Expr::InList {
+            expr: x(),
+            list: vec![Expr::Nested(Box::new(subquery())), Expr::value(number("1"))],
+            negated: true,
+        },
+        select.selection.unwrap()
+    );
+
+    let select = verified_only_select("SELECT * FROM t WHERE x IN ((SELECT a FROM u) + 1, 2)");
+    assert_eq!(
+        Expr::InList {
+            expr: x(),
+            list: vec![
+                Expr::BinaryOp {
+                    left: Box::new(subquery()),
+                    op: BinaryOperator::Plus,
+                    right: Box::new(Expr::value(number("1"))),
+                },
+                Expr::value(number("2"))
+            ],
+            negated: false,
+        },
+        select.selection.unwrap()
+    );
+
+    let select = pg_and_generic()
+        .verified_only_select("SELECT * FROM t WHERE x IN ((SELECT a FROM u)[1], 2)");
+    assert_matches!(
+        select.selection,
+        Some(Expr::InList { ref list, .. })
+            if matches!(&list[0], Expr::CompoundFieldAccess { root, .. } if **root == subquery())
+    );
+
+    let select = verified_only_select("SELECT * FROM t WHERE x IN ((SELECT a FROM u))");
+    assert_eq!(
+        Expr::InSubquery {
+            expr: x(),
+            subquery: Box::new(verified_query("(SELECT a FROM u)")),
+            negated: false,
+        },
+        select.selection.unwrap()
+    );
+
+    assert_eq!(
+        ParserError::ParserError("Expected: ), found: 1".to_string()),
+        parse_sql_statements("SELECT * FROM t WHERE x IN ((SELECT a FROM u) 1)").unwrap_err()
+    );
+    assert_eq!(
+        ParserError::ParserError("Expected: ), found: EOF".to_string()),
+        parse_sql_statements("SELECT * FROM t WHERE x IN (SELECT a FROM u").unwrap_err()
+    );
+    assert_eq!(
+        ParserError::ParserError("Expected: ), found: EOF".to_string()),
+        parse_sql_statements("SELECT * FROM t WHERE x IN ((SELECT a FROM u), 1").unwrap_err()
+    );
+    // The inner `IN` is read again for the outer list after its subquery
+    // arm was cached as failed.
+    assert_eq!(
+        ParserError::ParserError("Expected: ), found: EOF".to_string()),
+        parse_sql_statements("SELECT * FROM t WHERE x IN ((SELECT 1 FROM u WHERE y IN (SELECT 2")
+            .unwrap_err()
+    );
+}
+
+/// Hang guard for `IN` lists nested in the leading subquery of an enclosing
+/// `IN` list, where every level is first tried as the whole subquery and then
+/// read again as a list item.
+#[test]
+fn parse_in_list_nested_leading_subquery_no_exponential_blowup() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    for level in [
+        "x IN ((SELECT {}), 1)",
+        "x IN ((SELECT {}) + 1, 2)",
+        "x IN (((SELECT {}) + 1), 2)",
+    ] {
+        let sql = format!(
+            "SELECT {}",
+            (0..30).fold("1".to_string(), |inner, _| level.replace("{}", &inner))
+        );
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = Parser::new(&GenericDialect {})
+                .with_recursion_limit(1000)
+                .try_with_sql(&sql)
+                .and_then(|mut parser| parser.parse_statements());
+            let _ = tx.send(result.is_ok());
+        });
+
+        let parsed = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("parser should handle this quickly, not loop exponentially");
+        assert!(parsed, "{level} nested 30 deep should parse");
+    }
+}
+
+#[test]
+fn parse_bang_not_renders_apart_from_operand() {
+    let dialects = all_dialects_where(|d| d.supports_bang_not_operator());
+    dialects.verified_stmt("SELECT ! !a");
+    dialects.verified_stmt("SELECT ! ! !a");
+    dialects.verified_stmt("SELECT ! ~ a");
+    dialects.verified_stmt("SELECT ! -a");
+    dialects.verified_stmt("SELECT ! +a");
+    dialects.verified_stmt("SELECT !a");
+    dialects.verified_stmt("SELECT !(b > 3)");
+    dialects.verified_stmt("SELECT ! -a + b");
+    dialects.verified_stmt("SELECT !a + b");
+    dialects.verified_stmt("SELECT !NOT a");
+    dialects.verified_stmt("SET eaac_cion = ! !o");
+    dialects.one_statement_parses_to("SET eaac_cion = ! ! o", "SET eaac_cion = ! !o");
 }

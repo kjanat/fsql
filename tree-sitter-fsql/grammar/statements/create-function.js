@@ -1,11 +1,12 @@
-import { paren_list, wrapped_in_parenthesis } from "../helpers.js";
+import { paren_list, wrapped_in_parenthesis } from "#grammar/helpers";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   // This is only used in create function statement, it is not needed to check
   // the start tag match the end one. The usage of this syntax in other
   // context is done by _dollar_string.
-  dollar_quote: () => /\$[^\$]*\$/,
+  dollar_quote: () => /\$[^$]*\$/,
 
   create_function: $ => seq(
     $.keyword_create,

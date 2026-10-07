@@ -1,3 +1,4 @@
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _rename_statement: $ => seq(

@@ -11171,7 +11171,7 @@
     },
     "dollar_quote": {
       "type": "PATTERN",
-      "value": "\\$[^\\$]*\\$"
+      "value": "\\$[^$]*\\$"
     },
     "create_function": {
       "type": "SEQ",

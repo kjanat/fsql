@@ -69,5 +69,34 @@ lint.rules   = {
 }
 
 [[schemas]]  # https://doc.rust-lang.org/cargo/reference/config.html#configuration-format
-path    = "https://www.schemastore.org/cargo-config.json"
-include = ["**/.cargo/config.toml", "**/.config/nightly.toml"]
+path    = "https://raw.githubusercontent.com/kjanat/cargo-config-schema/refs/heads/master/cargo-config.json"  # "https://www.schemastore.org/cargo-config.json"
+include = ["**/.cargo/config.toml", "**/.config/*.toml"]
+
+[[schemas]]
+path    = "https://www.schemastore.org/rustfmt.json"
+include = [".rustfmt.toml", "rustfmt.toml"]
+
+[[schemas]]
+path    = "https://www.schemastore.org/rust-toolchain.json"
+include = ["rust-toolchain.toml"]
+
+[[schemas]]
+root    = "tool.ty"
+path    = "https://www.schemastore.org/ty.json"
+include = ["pyproject.toml"]
+
+[[schemas]]
+root    = "tool.ruff"
+path    = "https://www.schemastore.org/ruff.json"
+include = ["pyproject.toml"]
+
+# Zed Editor
+[[schemas]]
+path    = "https://raw.githubusercontent.com/kjanat/zed-editor/feature/extension-toml-schema/crates/extension_api/schemas/language-config.schema.json"
+include = ["editors/zed/languages/fsql/config.toml"]
+strict  = false
+
+[[schemas]]
+path    = "https://raw.githubusercontent.com/kjanat/zed-editor/feature/extension-toml-schema/crates/extension_api/schemas/extension.schema.json"
+include = ["editors/zed/extension.toml"]
+strict  = false

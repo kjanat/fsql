@@ -1,5 +1,6 @@
-import { comma_list, optional_parenthesis, paren_list, wrapped_in_parenthesis } from "../helpers.js";
+import { comma_list, optional_parenthesis, paren_list, wrapped_in_parenthesis } from "#grammar/helpers";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _cte: $ => seq(

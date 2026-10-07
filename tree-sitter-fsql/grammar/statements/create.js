@@ -1,8 +1,9 @@
-import { comma_list, paren_list, wrapped_in_parenthesis } from "../helpers.js";
+import { comma_list, paren_list, wrapped_in_parenthesis } from "#grammar/helpers";
 
-import create_function_rules from "./create-function.js";
-import create_procedure_rules from "./create-procedure.js";
+import create_function_rules from "#grammar/statements/create-function";
+import create_procedure_rules from "#grammar/statements/create-procedure";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _create_statement: $ => seq(

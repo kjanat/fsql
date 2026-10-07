@@ -902,6 +902,21 @@ fn test_duckdb_lambda_function() {
     let sql_arrow = "SELECT list_filter([1, 2, 3], x -> x > 1)";
     duckdb().verified_stmt(sql_arrow);
 
+    // Both readings of `->` print identically, so round-tripping cannot tell
+    // a lambda from JSON member access. Assert the shape instead.
+    let select = duckdb().verified_only_select(sql_arrow);
+    let Expr::Function(func) = expr_from_projection(only(&select.projection)) else {
+        panic!("expected a function call");
+    };
+    let FunctionArguments::List(args) = &func.args else {
+        panic!("expected an argument list");
+    };
+    let [_, FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Lambda(lambda)))] = &args.args[..]
+    else {
+        panic!("expected the second argument to be a lambda");
+    };
+    assert_eq!(LambdaSyntax::Arrow, lambda.syntax);
+
     // Test lambda with multiple parameters (with index)
     let sql_multi = "SELECT list_filter([1, 3, 1, 5], lambda x, i : x > i)";
     duckdb().verified_stmt(sql_multi);
@@ -909,4 +924,21 @@ fn test_duckdb_lambda_function() {
     // Test lambda in list_transform
     let sql_transform = "SELECT list_transform([1, 2, 3], lambda x : x * 2)";
     duckdb().verified_stmt(sql_transform);
+}
+
+#[test]
+fn test_duckdb_nested_block_comments() {
+    duckdb().one_statement_parses_to(
+        "SELECT a /* outer /* inner */ still comment */ FROM t",
+        "SELECT a FROM t",
+    );
+
+    let err = duckdb()
+        .parse_sql_statements("SELECT a /* outer /* inner */ FROM t")
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Unexpected EOF while in a multi-line comment"),
+        "{err}"
+    );
 }

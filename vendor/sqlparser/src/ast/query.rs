@@ -295,14 +295,13 @@ impl fmt::Display for SetQuantifier {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-/// A [`TABLE` command]( https://www.postgresql.org/docs/current/sql-select.html#SQL-TABLE)
+/// A [`TABLE` command](https://www.postgresql.org/docs/current/sql-select.html#SQL-TABLE)
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
-/// A (possibly schema-qualified) table reference used in `FROM` clauses.
 pub struct Table {
     /// Optional table name (absent for e.g. `TABLE` command without argument).
-    pub table_name: Option<String>,
+    pub table_name: Option<Ident>,
     /// Optional schema/catalog name qualifying the table.
-    pub schema_name: Option<String>,
+    pub schema_name: Option<Ident>,
 }
 
 impl fmt::Display for Table {
@@ -1653,6 +1652,21 @@ pub enum TableFactor {
         /// Optional alias for the resulting table.
         alias: Option<TableAlias>,
     },
+    /// Object unpivoting on a SUPER expression in the FROM clause.
+    ///
+    /// Syntax:
+    /// ```sql
+    /// UNPIVOT expression AS value_alias [AT attribute_alias]
+    /// ```
+    /// [Redshift](https://docs.aws.amazon.com/redshift/latest/dg/query-super.html#unpivoting)
+    UnpivotExpr {
+        /// SUPER expression to unpivot.
+        expression: Expr,
+        /// Alias for the generated unpivoted value.
+        value_alias: Ident,
+        /// Optional alias for the generated attribute key/index.
+        attribute_alias: Option<Ident>,
+    },
     /// A `MATCH_RECOGNIZE` operation on a table.
     ///
     /// See <https://docs.snowflake.com/en/sql-reference/constructs/match_recognize>.
@@ -2179,6 +2193,8 @@ pub enum RepetitionQuantifier {
     AtMost(u32),
     /// `{n,m}
     Range(u32, u32),
+    /// A reluctant (non-greedy) quantifier, for example `*?` or `{n,m}?`.
+    Reluctant(Box<RepetitionQuantifier>),
 }
 
 impl fmt::Display for RepetitionQuantifier {
@@ -2192,6 +2208,7 @@ impl fmt::Display for RepetitionQuantifier {
             AtLeast(n) => write!(f, "{{{n},}}"),
             AtMost(n) => write!(f, "{{,{n}}}"),
             Range(n, m) => write!(f, "{{{n},{m}}}"),
+            Reluctant(quantifier) => write!(f, "{quantifier}?"),
         }
     }
 }
@@ -2216,7 +2233,7 @@ impl fmt::Display for TableFactor {
                     json_path.fmt(f)?;
                 }
                 if !partitions.is_empty() {
-                    write!(f, "PARTITION ({})", display_comma_separated(partitions))?;
+                    write!(f, " PARTITION ({})", display_comma_separated(partitions))?;
                 }
                 if let Some(args) = args {
                     write!(f, "(")?;
@@ -2419,6 +2436,17 @@ impl fmt::Display for TableFactor {
                 )?;
                 if let Some(alias) = alias {
                     write!(f, " {alias}")?;
+                }
+                Ok(())
+            }
+            TableFactor::UnpivotExpr {
+                expression,
+                value_alias,
+                attribute_alias,
+            } => {
+                write!(f, "UNPIVOT {expression} AS {value_alias}")?;
+                if let Some(attribute_alias) = attribute_alias {
+                    write!(f, " AT {attribute_alias}")?;
                 }
                 Ok(())
             }
@@ -3108,10 +3136,10 @@ impl fmt::Display for LimitClause {
                 limit_by,
                 offset,
             } => {
-                if let Some(ref limit) = limit {
+                if let Some(limit) = limit {
                     write!(f, " LIMIT {limit}")?;
                 }
-                if let Some(ref offset) = offset {
+                if let Some(offset) = offset {
                     write!(f, " {offset}")?;
                 }
                 if !limit_by.is_empty() {

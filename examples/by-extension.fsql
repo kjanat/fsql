@@ -1,0 +1,12 @@
+-- Metadata is loaded only for columns requested by the query.
+SELECT
+    ext,
+    count(*) AS file_count,
+    sum(size) AS total_bytes,
+    human(sum(size)) AS readable_size,
+    human(avg(size)) AS average_size,
+    human(max(size)) AS largest_file
+FROM files
+WHERE kind = 'file'
+GROUP BY ext
+ORDER BY total_bytes DESC, ext;

@@ -16,18 +16,18 @@
 # under the License.
 
 [package]
-name        = "sqlparser_bench"
-version     = "0.1.0"
-authors     = ["Dandandan <danielheres@gmail.com>"]
-edition     = "2018"
+name = "sqlparser_bench"
 description = "Benchmarks for sqlparser"
-
-[[bench]]
-harness = false
-name    = "sqlparser_bench"
+version = "0.1.0"
+authors = ["Dandandan <danielheres@gmail.com>"]
+edition = "2018"
 
 [dependencies]
 sqlparser = { path = "../" }
 
 [dev-dependencies]
 criterion = "0.8"
+
+[[bench]]
+name = "sqlparser_bench"
+harness = false

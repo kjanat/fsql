@@ -10,6 +10,7 @@ const examples = readdirSync(new URL('../examples/', import.meta.url))
 	.sort()
 	.map(name => `examples/${name}`);
 
+/** @param {...string} args */
 function run(...args) {
 	const result = spawnSync('tree-sitter', args, { cwd: root, encoding: 'utf8' });
 	if (result.error) throw result.error;

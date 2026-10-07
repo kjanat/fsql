@@ -1,0 +1,4 @@
+SELECT ext, count(*), sum(size)
+FROM files
+WHERE kind = 'file'
+GROUP BY ext;

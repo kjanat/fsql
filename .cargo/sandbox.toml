@@ -1,0 +1,3 @@
+# Opt in from the workspace root with: cargo sandbox:fsql ...
+[target.'cfg(target_os = "linux")']
+runner = ["./scripts/sandbox-runner.sh"]

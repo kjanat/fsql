@@ -1,5 +1,6 @@
-import { paren_list } from "../helpers.js";
+import { paren_list } from "#grammar/helpers";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _alter_statement: $ => seq(

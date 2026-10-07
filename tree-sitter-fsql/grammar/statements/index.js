@@ -1,21 +1,22 @@
-import { optional_parenthesis, wrapped_in_parenthesis } from "../helpers.js";
+import { optional_parenthesis, wrapped_in_parenthesis } from "#grammar/helpers";
 
-import create_rules from "./create.js";
-import alter_rules from "./alter.js";
-import drop_rules from "./drop.js";
-import rename_rules from "./rename.js";
-import optimize_rules from "./optimize.js";
-import merge_rules from "./merge.js";
-import comment_rules from "./comment.js";
-import delete_rules from "./delete.js";
-import insert_rules from "./insert.js";
-import update_rules from "./update.js";
-import truncate_rules from "./truncate.js";
-import copy_rules from "./copy.js";
-import select_rules from "./select.js";
-import set_rules from "./set.js";
-import refresh_rules from "./refresh.js";
+import alter_rules from "#grammar/statements/alter";
+import comment_rules from "#grammar/statements/comment";
+import copy_rules from "#grammar/statements/copy";
+import create_rules from "#grammar/statements/create";
+import delete_rules from "#grammar/statements/delete";
+import drop_rules from "#grammar/statements/drop";
+import insert_rules from "#grammar/statements/insert";
+import merge_rules from "#grammar/statements/merge";
+import optimize_rules from "#grammar/statements/optimize";
+import refresh_rules from "#grammar/statements/refresh";
+import rename_rules from "#grammar/statements/rename";
+import select_rules from "#grammar/statements/select";
+import set_rules from "#grammar/statements/set";
+import truncate_rules from "#grammar/statements/truncate";
+import update_rules from "#grammar/statements/update";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   block: $ => seq(

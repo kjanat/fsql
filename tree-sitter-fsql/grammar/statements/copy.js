@@ -1,5 +1,6 @@
-import { wrapped_in_parenthesis } from "../helpers.js";
+import { wrapped_in_parenthesis } from "#grammar/helpers";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _copy_statement: $ => seq(

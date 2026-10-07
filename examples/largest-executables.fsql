@@ -1,0 +1,6 @@
+-- Regular files with at least one execute permission bit; not a format check.
+SELECT path, perms, human(size) AS readable_size, size
+FROM files
+WHERE kind = 'file' AND mode & 0o111 <> 0
+ORDER BY size DESC, path
+LIMIT 20;

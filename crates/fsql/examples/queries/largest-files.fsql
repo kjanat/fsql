@@ -1,0 +1,23 @@
+-- Keep only the ten largest files; count the whole tree in a separate cheap scan.
+-- Directory totals include the scan root. Symlinks are neither files nor dirs.
+WITH largest AS (
+    SELECT path, size, perms
+    FROM files
+    WHERE kind = 'file'
+    ORDER BY size DESC, path
+    LIMIT 10
+), totals AS (
+    SELECT
+        coalesce(sum(CAST(kind = 'file' AS INT)), 0) AS total_files,
+        coalesce(sum(CAST(kind = 'dir' AS INT)), 0) AS total_dirs
+    FROM files
+)
+SELECT
+    largest.path,
+    human(largest.size) AS readable_size,
+    largest.size,
+    largest.perms,
+    totals.total_files,
+    totals.total_dirs
+FROM totals LEFT JOIN largest ON true
+ORDER BY largest.size DESC, largest.path;

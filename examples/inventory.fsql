@@ -1,0 +1,6 @@
+-- Run with fsql -C DIR --from-file examples/inventory.fsql.
+SELECT path, size, human(size) AS readable_size
+FROM files
+WHERE kind = 'file'
+ORDER BY size DESC, path
+LIMIT 20;

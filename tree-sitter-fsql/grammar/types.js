@@ -1,5 +1,6 @@
-import { make_keyword, comma_list, paren_list, wrapped_in_parenthesis } from "./helpers.js";
+import { comma_list, make_keyword, paren_list, wrapped_in_parenthesis } from "#grammar/helpers";
 
+/** @satisfies {RuleBuilders<string, never>} */
 export default {
 
   _type: $ => prec.left(
@@ -171,6 +172,10 @@ export default {
 
 };
 
+/**
+ * @param {GrammarSymbols<string>} $
+ * @param {RuleOrLiteral} type
+ */
 function unsigned_type($, type) {
   return choice(
     seq($.keyword_unsigned, type),
@@ -182,6 +187,11 @@ function unsigned_type($, type) {
   )
 }
 
+/**
+ * @param {GrammarSymbols<string>} $
+ * @param {RuleOrLiteral} type
+ * @param {[string, ...string[]]} [params]
+ */
 function parametric_type($, type, params = ['size']) {
   return prec.right(1,
     choice(
@@ -190,10 +200,10 @@ function parametric_type($, type, params = ['size']) {
         type,
         wrapped_in_parenthesis(
           seq(
-            // first parameter is guaranteed, shift it out of the array
-            field(params.shift(), alias($._natural_number, $.literal)),
-            // then, fill in the ", next" until done
-            ...params.map(p => seq(',', field(p, alias($._natural_number, $.literal)))),
+            // The tuple requires a first parameter name.
+            field(params[0], alias($._natural_number, $.literal)),
+            // Add the remaining parameter names without mutating the input.
+            ...params.slice(1).map(p => seq(',', field(p, alias($._natural_number, $.literal)))),
           ),
         ),
       ),
