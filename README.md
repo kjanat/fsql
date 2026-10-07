@@ -2,6 +2,10 @@
 
 > SQL over the filesystem.
 
+<!--[![Crates.io](https://img.shields.io/crates/v/fsql?logo=rust&labelColor=B7410E&color=black)](https://crates.io/crates/fsql)-->
+<!--[![NPM](https://img.shields.io/npm/v/fsql?logo=npm&labelColor=CB3837&color=black)](https://npm.im/fsql)-->
+[![License: MIT](https://img.shields.io/npm/l/fsql?color=blue)](./LICENSE)
+
 Query with `SELECT`, change with `DELETE`, `UPDATE` and `INSERT`.
 
 Mutations preview by default, run only with `--apply`, and every applied statement is journaled so it can be undone.
@@ -12,7 +16,7 @@ Find the largest files, with permissions, exact/readable sizes, and totals for t
 fsql -C ~/projects --from-file crates/fsql/examples/queries/largest-files.fsql
 ```
 
-<details><summary><tt>largest-files.fsql</tt></summary>
+<details open><summary><tt>largest-files.fsql</tt></summary>
 
 ```sql
 -- Keep only the ten largest files; count the whole tree in a separate cheap scan.
@@ -50,6 +54,14 @@ fsql -C ~/projects -e "select ext, count(*), sum(size) from files group by ext o
 fsql -e "delete from files where ext = 'tmp' and mtime < now() - interval '30' day"
 fsql --apply -e "delete from files where ext = 'tmp' and mtime < now() - interval '30' day"
 fsql undo 18d32e8f3c07b302-129aef
+```
+
+## Install
+
+```sh
+# cargo install --git https://github.com/kjanat/fsql fsql-cli[@<VER>] --bin fsql
+# e.g.
+cargo install --git https://github.com/kjanat/fsql fsql-cli --bin fsql
 ```
 
 ## Input
