@@ -1,4 +1,8 @@
 //! Launch the local TypeScript fsql language server from Zed.
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/kjanat/fsql/master/media/fsql-icon.svg",
+    html_favicon_url = "https://raw.githubusercontent.com/kjanat/fsql/master/media/fsql-icon.svg"
+)]
 
 use zed_extension_api::{self as zed, settings::LspSettings};
 

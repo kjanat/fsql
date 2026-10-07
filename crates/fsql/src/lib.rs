@@ -1,4 +1,8 @@
 //! SQL query and mutation engine over the filesystem.
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/kjanat/fsql/master/media/fsql-icon.svg",
+    html_favicon_url = "https://raw.githubusercontent.com/kjanat/fsql/master/media/fsql-icon.svg"
+)]
 
 mod bind;
 pub mod column;
