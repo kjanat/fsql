@@ -2,7 +2,7 @@
 WITH RECURSIVE
 inventory AS (
   SELECT path, name, parent,
-         substr(path, length({{root}}) + 2) AS relative_path
+         substr(path, length(rtrim({{root}}, '/')) + 2) AS relative_path
   FROM files({{root}})
   WHERE kind IN ('file', 'symlink')
 ),

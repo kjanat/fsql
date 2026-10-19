@@ -44,6 +44,30 @@ def executable(value: str) -> str:
     return str(Path(resolved).absolute())
 
 
+def publish_report(output: Path, report: dict) -> None:
+    """Replace a report only after a complete write; preserve it on failure."""
+    payload = json.dumps(report, indent=2) + "\n"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def assignment(value: str) -> tuple[str, str]:
     name, sep, path = value.partition("=")
     if not sep or not name or not path:
@@ -476,7 +500,7 @@ def main() -> int:
         if not args.root:
             root.mkdir()
             fixture(root, args.files)
-        if args.output.is_relative_to(root):
+        if root != Path(root.anchor) and args.output.is_relative_to(root):
             parser.error("output must be outside the measured tree")
         before = inventory(root)
         commands = []
@@ -511,7 +535,10 @@ def main() -> int:
                     fsql_command(name, binary, case, root, args.size, legacy)
                     for name, binary, legacy in binaries
                 ]
-                tools = [(name, shutil.which(name)) for name in args.tools]
+                tools = [
+                    (name, executable(found) if (found := shutil.which(name)) else None)
+                    for name in args.tools
+                ]
                 if args.gahag:
                     tools.append(("gahag", executable(args.gahag)))
                 for name, binary in tools:
@@ -618,8 +645,9 @@ def main() -> int:
             "skipped": skipped,
             "results": results,
         }
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, indent=2) + "\n")
+        # For a filesystem-root scan there is no outside destination. Publish
+        # only after all result, input-tree, and executable checks have passed.
+        publish_report(args.output, report)
         print(
             "\ncase                 tool                 rows     median ms       min       max"
         )

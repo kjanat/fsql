@@ -1,11 +1,16 @@
 """Contract tests use installed tools and fail closed on divergent output."""
 
+import contextlib
+import io
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from benchmarks import run as bench
 
@@ -125,6 +130,118 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(
             all(len(binary["sha256"]) == 64 for binary in data["binaries"].values())
         )
+
+    def test_relative_path_tools_survive_changed_working_directory(self):
+        tool = shutil.which("find")
+        if tool is None:
+            self.fail("find must be installed for the relative-PATH regression test")
+        (self.root / "bin").mkdir()
+        (self.root / "bin/find").symlink_to(Path(tool).absolute())
+        report = self.root / "relative-path-report.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(bench.REPO / "benchmarks/run.py"),
+                "--tools",
+                "find",
+                "--case",
+                "paths",
+                "--files",
+                "20",
+                "--runs",
+                "1",
+                "--warmups",
+                "0",
+                "--output",
+                str(report),
+            ],
+            cwd=self.root,
+            env={**os.environ, "PATH": "bin"},
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        rows = json.loads(report.read_text())["results"]
+        command = next(row for row in rows if row["tool"] == "find")
+        self.assertEqual(command["argv"][0], str(self.root / "bin/find"))
+
+    def test_report_replacement_preserves_previous_report_on_failure(self):
+        report = self.root / "report.json"
+        report.write_text('{"previous": true}\n')
+        before = set(self.root.iterdir())
+        for target in ["os.fsync", "os.replace"]:
+            with (
+                self.subTest(target=target),
+                patch.object(
+                    bench.os, target.split(".")[1], side_effect=OSError("disk failure")
+                ),
+                self.assertRaises(OSError),
+            ):
+                bench.publish_report(report, {"new": True})
+            self.assertEqual(json.loads(report.read_text()), {"previous": True})
+            self.assertEqual(set(self.root.iterdir()), before)
+        bench.publish_report(report, {"new": True})
+        self.assertEqual(json.loads(report.read_text()), {"new": True})
+        self.assertEqual(set(self.root.iterdir()), before)
+
+    def test_filesystem_root_report_is_published_after_final_snapshot(self):
+        report = self.root / "new-directory/report.json"
+        snapshots = []
+
+        def snapshot(root):
+            self.assertEqual(root, Path("/"))
+            self.assertFalse(report.parent.exists())
+            snapshots.append(root)
+            return {}
+
+        argv = [
+            "bench",
+            "--root",
+            "/",
+            "--tools",
+            "--case",
+            "paths",
+            "--runs",
+            "1",
+            "--warmups",
+            "0",
+            "--output",
+            str(report),
+        ]
+        # Exercise orchestration without scanning the host filesystem.
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(bench, "inventory", side_effect=snapshot),
+            patch.object(bench, "verify", return_value=[]),
+            patch.object(bench, "run", return_value=(1.0, b"")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(bench.main(), 0)
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(json.loads(report.read_text())["root"], "/")
+
+    def test_original_query_relative_paths_include_filesystem_root(self):
+        template = (bench.REPO / "benchmarks/queries/hell.fsql").read_text()
+        inventory_sql = template.split("inventory AS (", 1)[1].split(
+            "),\ncandidates", 1
+        )[0]
+        for root in ["/", "/tmp/project", "/tmp/quote'root"]:
+            path = root.rstrip("/") + "/build/file"
+            # Run the actual template projection over a constant row instead of files('/').
+            sql = inventory_sql.replace("{{root}}", bench.sql_string(root)).replace(
+                f"files({bench.sql_string(root)})",
+                f"(SELECT {bench.sql_string(path)} AS path, 'file' AS name, "
+                "'build' AS parent, 'file' AS kind) AS fixture",
+            )
+            result = subprocess.run(
+                [str(bench.REPO / "target/release/fsql"), "-f", "json", "-e=" + sql],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual(json.loads(result.stdout)["relative_path"], "build/file")
 
     def test_invalid_utf8_is_rejected(self):
         import os
