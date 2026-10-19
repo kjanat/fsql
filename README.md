@@ -90,37 +90,56 @@ For editor highlighting of `.fsql` query files, use the bundled [Zed extension] 
 
 `files` has one row per directory entry below the root, the root included. Symbolic links are rows and are never followed.
 
-| column | type      | source   |
-| ------ | --------- | -------- |
-| path   | text      | walk     |
-| name   | text      | walk     |
-| parent | text      | walk     |
-| ext    | text      | walk     |
-| depth  | int       | walk     |
-| hidden | bool      | walk     |
-| kind   | text      | dirent   |
-| size   | int       | statx    |
-| blocks | int       | statx    |
-| mode   | int       | statx    |
-| perms  | text      | statx    |
-| setuid | bool      | statx    |
-| setgid | bool      | statx    |
-| sticky | bool      | statx    |
-| uid    | int       | statx    |
-| gid    | int       | statx    |
-| user   | text      | passwd   |
-| group  | text      | group    |
-| nlink  | int       | statx    |
-| inode  | int       | statx    |
-| dev    | int       | statx    |
-| atime  | timestamp | statx    |
-| mtime  | timestamp | statx    |
-| ctime  | timestamp | statx    |
-| btime  | timestamp | statx    |
-| target | text      | readlink |
-| broken | bool      | statx    |
+| column        | type      | source   |
+| ------------- | --------- | -------- |
+| path          | text      | walk     |
+| relative_path | text      | walk     |
+| name          | text      | walk     |
+| parent        | text      | walk     |
+| ext           | text      | walk     |
+| depth         | int       | walk     |
+| hidden        | bool      | walk     |
+| kind          | text      | dirent   |
+| size          | int       | statx    |
+| blocks        | int       | statx    |
+| mode          | int       | statx    |
+| perms         | text      | statx    |
+| setuid        | bool      | statx    |
+| setgid        | bool      | statx    |
+| sticky        | bool      | statx    |
+| uid           | int       | statx    |
+| gid           | int       | statx    |
+| user          | text      | passwd   |
+| group         | text      | group    |
+| nlink         | int       | statx    |
+| inode         | int       | statx    |
+| dev           | int       | statx    |
+| atime         | timestamp | statx    |
+| mtime         | timestamp | statx    |
+| ctime         | timestamp | statx    |
+| btime         | timestamp | statx    |
+| target        | text      | readlink |
+| broken        | bool      | statx    |
 
 `kind` is one of `file`, `dir`, `symlink`, `fifo`, `socket`, `block`, `char`.
+
+`relative_path` is relative to the root supplied to `files(...)` (or the default query root), uses `/` separators, and is empty for the root row. It keeps that meaning when a path predicate narrows the scan. Like `path`, it preserves non-UTF-8 filenames as byte values.
+
+`GLOB ANY (ARRAY[...])` matches at least one pattern, with the same brace expansion and separator semantics as `GLOB`:
+
+```sql
+SELECT relative_path
+FROM files('.')
+WHERE kind IN ('file', 'symlink')
+  AND NOT (relative_path GLOB ANY (ARRAY[
+    '**/{.git,node_modules,target}{,/**}',
+    '{build,dist}{,/**}'
+  ]));
+```
+
+Constant string arrays compile into a cached glob set. Empty arrays match nothing; a NULL subject or an unmatched array containing NULL produces NULL. A match wins over NULL array elements. Array elements may also be expressions.
+
+For a single `files` source, mandatory `NOT (relative_path GLOB ...)` and `NOT (relative_path GLOB ANY (...))` filters can prune traversal. Constant patterns ending in `{,/**}` or `/**` prove that every descendant of a matching directory is excluded. The directory row itself is still evaluated normally. Other patterns, filename filters, and exclusions inside `OR` do not trigger pruning. This is a conservative SQL optimization; it does not read Git's index or ignore files.
 
 Columns are read lazily, so a query touching only `path` and `kind` never calls `statx`.
 

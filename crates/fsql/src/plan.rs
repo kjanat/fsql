@@ -485,6 +485,14 @@ impl Planner {
             source.root = root;
             source.options.initial_depth = depth;
         }
+        if let [clause] = from.as_mut_slice()
+            && clause.joins.is_empty()
+            && let Relation::Table { source, alias } = &mut clause.relation
+            && source.table == Table::Files
+            && let Some(filter) = &select.selection
+        {
+            subtree_exclusions(filter, alias, &mut source.options.excluded_subtrees);
+        }
         let projection = select
             .projection
             .iter()
@@ -1080,6 +1088,70 @@ pub fn narrow(root: &Path, filter: &Expr) -> Option<(PathBuf, u32)> {
     }
     let depth = dir.strip_prefix(&root).ok()?.components().count();
     Some((dir, u32::try_from(depth).ok()?))
+}
+
+/// Only mandatory negative predicates can prove that descendants are excluded.
+/// In particular, never infer pruning from a directory failing a row predicate.
+fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) {
+    use crate::eval::{constant_globs, unnest};
+    match unnest(expr) {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            subtree_exclusions(left, alias, patterns);
+            subtree_exclusions(right, alias, patterns);
+        }
+        Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Not,
+            expr,
+        } => {
+            let candidates = match unnest(expr) {
+                Expr::AnyOp {
+                    left,
+                    compare_op: BinaryOperator::Glob,
+                    right,
+                    ..
+                } if local_relative_path(left, alias) => constant_globs(right),
+                Expr::BinaryOp {
+                    left,
+                    op: BinaryOperator::Glob,
+                    right,
+                } if local_relative_path(left, alias) => {
+                    string_literal(right).map(|s| vec![s.to_owned()])
+                }
+                _ => None,
+            };
+            if let Some(candidates) = candidates {
+                for pattern in candidates {
+                    // Escapes could change the meaning of the suffix boundary.
+                    if pattern.contains('\\') {
+                        continue;
+                    }
+                    if let Some(prefix) = pattern.strip_suffix("{,/**}")
+                        .or_else(|| pattern.strip_suffix("/**"))
+                        && !prefix.is_empty()
+                        // Validate the full pattern as well as the extracted prefix.
+                        && globset::GlobBuilder::new(&pattern).literal_separator(false).build().is_ok()
+                        && globset::GlobBuilder::new(prefix).literal_separator(false).build().is_ok()
+                    {
+                        patterns.push(prefix.to_owned());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn local_relative_path(expr: &Expr, alias: &str) -> bool {
+    match crate::eval::unnest(expr) {
+        Expr::Identifier(name) => name.value.eq_ignore_ascii_case("relative_path"),
+        Expr::CompoundIdentifier(parts) => matches!(parts.as_slice(), [table, name]
+            if table.value.eq_ignore_ascii_case(alias) && name.value.eq_ignore_ascii_case("relative_path")),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

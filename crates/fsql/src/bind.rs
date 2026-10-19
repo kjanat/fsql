@@ -461,6 +461,7 @@ fn expression(
     aggregates: bool,
 ) -> Result<()> {
     let mut result = Ok(());
+    let mut quantified_arrays: Vec<&Expr> = Vec::new();
     visit(expr, &mut |node| {
         if result.is_err() {
             return false;
@@ -470,6 +471,13 @@ fn expression(
                 schema.column(&name)?;
             }
             match node {
+                Expr::AnyOp { right, .. } | Expr::AllOp { right, .. } => {
+                    quantified_arrays.push(crate::eval::unnest(right));
+                }
+                Expr::Array(_)
+                    if quantified_arrays
+                        .iter()
+                        .any(|array| std::ptr::eq(*array, node)) => {}
                 Expr::Function(function) => {
                     function_shape(function)?;
                     if is_aggregate(&function.name.to_string()) {
@@ -525,9 +533,7 @@ fn expression(
                 | Expr::Cast { .. }
                 | Expr::Substring { .. }
                 | Expr::Trim { .. }
-                | Expr::Extract { .. }
-                | Expr::AnyOp { .. }
-                | Expr::AllOp { .. } => {}
+                | Expr::Extract { .. } => {}
                 _ => return Err(Error::Unsupported(format!("expression `{node}`"))),
             }
             Ok(())

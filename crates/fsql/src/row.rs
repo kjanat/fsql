@@ -310,6 +310,14 @@ impl Row for Entry {
     fn column(&self, name: &str) -> Result<Value> {
         let column = Column::parse(name).ok_or_else(|| Error::UnknownColumn(name.to_owned()))?;
         Ok(match column {
+            Column::RelativePath => {
+                let components: Vec<_> = self.path.components().collect();
+                let relative: PathBuf = components
+                    [components.len().saturating_sub(self.depth as usize)..]
+                    .iter()
+                    .collect();
+                from_bytes(relative.as_os_str().as_bytes())
+            }
             Column::Path => from_bytes(self.path.as_os_str().as_bytes()),
             Column::Name => from_bytes(self.name.as_bytes()),
             Column::Parent => self

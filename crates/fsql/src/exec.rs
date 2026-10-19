@@ -714,6 +714,11 @@ pub fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr) -> bool) {
                 visit(item, f);
             }
         }
+        Expr::Array(array) => {
+            for expr in &array.elem {
+                visit(expr, f);
+            }
+        }
         Expr::InSubquery { expr, .. } => visit(expr, f),
         Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
             visit(left, f);
@@ -1942,6 +1947,97 @@ mod tests {
 
     fn texts(set: &ResultSet, column: usize) -> Vec<String> {
         set.rows.iter().map(|r| render(&r[column])).collect()
+    }
+
+    #[test]
+    fn relative_paths_survive_narrowing_and_aliases() {
+        let dir = fixture("relative");
+        let set = run_sql(&dir, "select relative_path from files where depth = 0").unwrap();
+        assert_eq!(texts(&set, 0), [""]);
+        let set = run_sql(
+            &dir,
+            &format!(
+                "select f.relative_path from files f where path = '{}'",
+                dir.join("src/main.rs").display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(texts(&set, 0), ["src/main.rs"]);
+        let set = run_sql(&dir, "select relative_path from files where kind = 'file' and name glob any (array['*.rs']) order by relative_path").unwrap();
+        assert_eq!(texts(&set, 0), ["src/lib.rs", "src/main.rs"]);
+        assert!(
+            run_sql(
+                &dir,
+                "select name from files where name glob any (array[missing_column])"
+            )
+            .is_err()
+        );
+        use std::os::unix::ffi::OsStrExt;
+        let raw = b"src/invalid-\xff.tmp";
+        std::fs::write(dir.join(std::ffi::OsStr::from_bytes(raw)), b"x").unwrap();
+        let set = run_sql(
+            &dir,
+            "select relative_path from files where name glob any (array['invalid-*'])",
+        )
+        .unwrap();
+        assert_eq!(set.rows, [vec![Value::Blob(raw.to_vec())]]);
+        let set = run_sql(&dir, "select o.relative_path from files o where o.name = 'main.rs' and exists (select 1 from files i where i.name = 'out.tmp' and not (o.relative_path glob any (array['build{,/**}'])))").unwrap();
+        assert_eq!(texts(&set, 0), ["src/main.rs"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subtree_pruning_preserves_results_and_skips_descendants() {
+        let dir = fixture("pruning");
+        std::fs::create_dir_all(dir.join("src/build/nested")).unwrap();
+        std::fs::write(dir.join("src/build/nested/keep.rs"), b"x").unwrap();
+        let mut filters = vec![
+            "kind = 'file' AND NOT (relative_path GLOB ANY (ARRAY['**/build{,/**}']))",
+            "NOT (relative_path GLOB ANY (ARRAY['build/**']))",
+            "NOT (relative_path GLOB ANY (ARRAY['build{,/**}'])) OR name = 'out.tmp'",
+            "NOT (relative_path GLOB ANY (ARRAY['build']))",
+            "NOT (relative_path GLOB ANY (ARRAY['**/build/**'])) AND kind = 'file'",
+            "NOT (relative_path GLOB 'build{,/**}')",
+            "NOT (name GLOB ANY (ARRAY['build{,/**}']))",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        filters.push(format!(
+            "path GLOB '{}/src/**' AND NOT (relative_path GLOB ANY (ARRAY['src/build{{,/**}}']))",
+            dir.display()
+        ));
+        for filter in filters {
+            let planner = Planner::new(&dir, WalkOptions::default());
+            let Plan::Select(mut plan) = planner
+                .plan(&format!(
+                    "select relative_path from files where {filter} order by relative_path"
+                ))
+                .unwrap()
+                .remove(0)
+            else {
+                panic!("select");
+            };
+            let optimized = run(&plan, &planner, &mut |e| panic!("{e}")).unwrap();
+            let SetBody::Select(select) = &mut plan.body else {
+                panic!("select");
+            };
+            let Relation::Table { source, .. } = &mut select.from[0].relation else {
+                panic!("table");
+            };
+            let pruned = !source.options.excluded_subtrees.is_empty();
+            let visited = base_rows(source).unwrap().count();
+            source.options.excluded_subtrees.clear();
+            let unpruned = base_rows(source).unwrap().count();
+            if pruned {
+                assert!(visited < unpruned, "{filter}");
+            } else {
+                assert_eq!(visited, unpruned);
+            }
+            let plain = run(&plan, &planner, &mut |e| panic!("{e}")).unwrap();
+            assert_eq!(optimized.rows, plain.rows, "{filter}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

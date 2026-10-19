@@ -22,6 +22,7 @@ pub enum Cost {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Column {
     Path,
+    RelativePath,
     Name,
     Parent,
     Ext,
@@ -100,8 +101,9 @@ pub const XATTR_COLUMNS: [&str; 4] = ["path", "name", "value", "size"];
 pub const ACL_COLUMNS: [&str; 5] = ["path", "kind", "tag", "qualifier", "perms"];
 
 impl Column {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::Path,
+        Self::RelativePath,
         Self::Name,
         Self::Parent,
         Self::Ext,
@@ -137,6 +139,7 @@ impl Column {
     pub fn name(self) -> &'static str {
         match self {
             Self::Path => "path",
+            Self::RelativePath => "relative_path",
             Self::Name => "name",
             Self::Parent => "parent",
             Self::Ext => "ext",
@@ -169,6 +172,7 @@ impl Column {
     pub fn type_of(self) -> Type {
         match self {
             Self::Path
+            | Self::RelativePath
             | Self::Name
             | Self::Parent
             | Self::Ext
@@ -194,9 +198,13 @@ impl Column {
     /// Some filesystems report `DT_UNKNOWN` for `kind`, forcing a `statx` fallback.
     pub fn cost(self) -> Cost {
         match self {
-            Self::Path | Self::Name | Self::Parent | Self::Ext | Self::Depth | Self::Hidden => {
-                Cost::Dirent
-            }
+            Self::Path
+            | Self::RelativePath
+            | Self::Name
+            | Self::Parent
+            | Self::Ext
+            | Self::Depth
+            | Self::Hidden => Cost::Dirent,
             Self::Kind => Cost::Dirent,
             Self::Size
             | Self::Blocks

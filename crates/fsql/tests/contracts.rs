@@ -64,6 +64,9 @@ fn invalid_sql_is_rejected_before_any_scan() {
     let engine = Engine::new("/definitely/missing/fsql", WalkOptions::default());
     for sql in [
         "select nonsense from files where false",
+        "select ARRAY['*'] from files where false",
+        "select name from files where name glob any (array[missing_column])",
+        "select name from files where name glob any (array[array['*']])",
         "select bogus(name) from files where false",
         "select lower(name, name) from files where false",
         "select name, sum(size) over () from files",
@@ -110,6 +113,7 @@ fn one_filesystem_cannot_be_bypassed_by_an_exact_path_predicate() {
             one_filesystem: true,
             max_depth: Some(3),
             initial_depth: 0,
+            ..WalkOptions::default()
         },
     );
     let result = engine

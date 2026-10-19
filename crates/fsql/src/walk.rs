@@ -31,6 +31,9 @@ pub struct WalkOptions {
     pub max_depth: Option<u32>,
     pub one_filesystem: bool,
     pub initial_depth: u32,
+    /// Relative directory globs proven to reject every descendant. Directory
+    /// rows are still emitted and evaluated by the query's complete filter.
+    pub excluded_subtrees: Vec<String>,
 }
 
 /// Private recovery directories reserve `.fsql-<hex>-<hex>-<decimal>` names.
@@ -159,13 +162,22 @@ impl Walker {
         let depth = options
             .max_depth
             .map(|max| max.saturating_sub(options.initial_depth) as usize);
+        let excluded = crate::eval::compile_globs(&options.excluded_subtrees)?;
+        // A narrowed scan still uses paths relative to the original source.
+        let components: Vec<_> = root.components().collect();
+        let prefix: PathBuf = components[components
+            .len()
+            .saturating_sub(options.initial_depth as usize)..]
+            .iter()
+            .collect();
         let policy: Arc<dyn ScanPolicy> =
             Arc::new(PathPredicate::new(move |path: &RelativePath, _| {
                 if path.file_name().is_some_and(recovery_name) {
                     ScanDecision::Excluded
                 } else {
                     ScanDecision::Eligible {
-                        initially_loaded: depth.is_none_or(|max| path.depth() < max),
+                        initially_loaded: depth.is_none_or(|max| path.depth() < max)
+                            && (excluded.is_empty() || !excluded.is_match(path.under(&prefix))),
                     }
                 }
             }));

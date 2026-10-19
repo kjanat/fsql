@@ -2,6 +2,7 @@ use sqlparser::ast::{BinaryOperator, Expr};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
+use sqlparser::tokenizer::Token;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FsqlDialect;
@@ -40,6 +41,19 @@ impl Dialect for FsqlDialect {
         ] {
             if parser.parse_keyword(keyword) {
                 let left = Box::new(expr.clone());
+                if op == BinaryOperator::Glob && parser.parse_keyword(Keyword::ANY) {
+                    return Some((|| {
+                        parser.expect_token(&Token::LParen)?;
+                        let right = parser.parse_expr()?;
+                        parser.expect_token(&Token::RParen)?;
+                        Ok(Expr::AnyOp {
+                            left,
+                            compare_op: op,
+                            right: Box::new(right),
+                            is_some: false,
+                        })
+                    })());
+                }
                 return Some(
                     parser
                         .parse_subexpr(precedence)
