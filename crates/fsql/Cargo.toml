@@ -26,11 +26,12 @@ serde_json.workspace = true
 uzers.workspace      = true
 
 [dev-dependencies]
-criterion.workspace = true
-ignore.workspace    = true
-jwalk.workspace     = true
-tempfile.workspace  = true
-walkdir.workspace   = true
+criterion.workspace   = true
+ignore.workspace      = true
+jwalk.workspace       = true
+stats_alloc.workspace = true
+tempfile.workspace    = true
+walkdir.workspace     = true
 
 [lints]
 workspace = true

@@ -153,3 +153,7 @@ cargo bench:traversal --test
 ```
 
 CI runs these correctness checks without performance thresholds. The Python integration tests cover real adapters, exact size boundaries, symlinks, special filenames, duplicate detection, stderr failures, and same-size input changes. Optional external tools are tested when installed. Timings from shared CI runners are not performance acceptance criteria.
+
+## Layer attribution and profiling
+
+Use [the layer probes](layers.md) to separate raw Scan, Walker, SQL, output and allocation costs. `cargo bench:layers --fixture 20000 all` runs timings; `cargo bench:alloc --fixture 20000 all` measures allocations separately. Both have CI smoke coverage.

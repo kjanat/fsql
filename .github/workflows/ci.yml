@@ -84,3 +84,8 @@ jobs:
       - name: Rust traversal benchmark correctness
         if: *notCancelled
         run: run bench:traversal --test
+      - name: Layer probe correctness
+        if: *notCancelled
+        run: |
+          cargo bench:layers --test
+          cargo bench:alloc --test
