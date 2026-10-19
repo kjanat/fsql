@@ -321,7 +321,9 @@ impl Planner {
             Statement::Delete(delete) => self.delete(delete),
             Statement::Update(update) => self.update(update),
             Statement::Insert(insert) => self.insert(insert),
-            other => Err(Error::Unsupported(format!("statement `{other}`"))),
+            // Unsupported SQL can contain credentials (for example CREATE SECRET).
+            // Never render the statement into an error that callers may log.
+            _ => Err(Error::Unsupported("statement".to_owned())),
         }
     }
 
@@ -1117,6 +1119,19 @@ mod tests {
         assert!(!plan.order_by[1].nulls_first);
         assert_eq!(plan.limit, Some(10));
         assert_eq!(plan.offset, 5);
+    }
+
+    #[test]
+    fn unsupported_secret_statements_do_not_echo_input() {
+        for sql in [
+            "CREATE SECRET private_name (TYPE S3, KEY_ID 'test_key', SECRET 'test_password')",
+            "DROP SECRET private_name",
+        ] {
+            let error = one(sql).unwrap_err();
+            assert!(matches!(error, Error::Unsupported(_)));
+            assert_eq!(error.to_string(), "unsupported: statement");
+            assert_eq!(format!("{error:?}"), "Unsupported(\"statement\")");
+        }
     }
 
     #[test]
