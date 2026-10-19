@@ -171,11 +171,25 @@ impl Walker {
         let depth = options
             .max_depth
             .map(|max| max.saturating_sub(options.initial_depth) as usize);
-        // A narrowed scan still uses paths relative to the original source.
-        let prefix = root
-            .strip_prefix(source_root)
-            .map_err(|_| Error::Plan("scan root is outside the source root".into()))?
-            .to_path_buf();
+        // Equal roots need no extra filesystem work. Narrowed roots must be
+        // compared in the same namespace, including relative and symlink sources.
+        let prefix = if root == source_root {
+            PathBuf::new()
+        } else {
+            let canonical_root = std::fs::canonicalize(root).map_err(|source| Error::Io {
+                path: root.to_path_buf(),
+                source,
+            })?;
+            let canonical_source =
+                std::fs::canonicalize(source_root).map_err(|source| Error::Io {
+                    path: source_root.to_path_buf(),
+                    source,
+                })?;
+            canonical_root
+                .strip_prefix(&canonical_source)
+                .map_err(|_| Error::Plan("scan root is outside the source root".into()))?
+                .to_path_buf()
+        };
         let narrowed_depth = prefix.components().count();
         let policy: Arc<dyn ScanPolicy> =
             Arc::new(PathPredicate::new(move |path: &RelativePath, _| {
@@ -226,6 +240,7 @@ impl Walker {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn cancellable(
         root: &Path,
         options: WalkOptions,

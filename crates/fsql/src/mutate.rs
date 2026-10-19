@@ -19,7 +19,7 @@ use crate::plan::{self, InsertColumn, InsertPlan, InsertRows, OrderKey, Plan, Pl
 use crate::row::{Entry, Frozen, Identity, Kind, STATX_MASK};
 use crate::time;
 use crate::value::Value;
-use crate::walk::{Walker, c_name, open_chain, validate_path};
+use crate::walk::{c_name, open_chain, validate_path};
 use crate::xattr;
 
 mod recovery;
@@ -212,9 +212,9 @@ fn collect(
     errors: &mut dyn FnMut(Error),
 ) -> Result<Vec<Target>> {
     let (mut evaluator, ctx) = exec::standalone_with_options(planner, options);
-    let walker = Walker::cancellable(
-        &selection.source.root,
-        selection.source.options.clone(),
+    let walker = selection.source.walker(
+        Some(selection.filter),
+        crate::prune::Pruning::default(),
         &ctx.control.options.cancellation,
     )?;
     let mut collected: Vec<(Vec<Value>, Target)> = Vec::new();
@@ -1559,6 +1559,23 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(self.dir.parent().expect("root"));
         }
+    }
+
+    #[test]
+    fn narrowed_mutations_keep_source_relative_paths() {
+        let fx = Fixture::new("relative-mutation");
+        let path = fx.dir.join("src/keep.rs");
+        for statement in ["delete from files", "update files set mode = 0o600"] {
+            for (relative, expected) in [("keep.rs", 0), ("src/keep.rs", 1)] {
+                let resolved = fx.resolve(&format!(
+                    "{statement} where path = '{}' and relative_path = '{relative}'",
+                    path.display()
+                ));
+                assert_eq!(resolved.len(), expected, "{statement}: {relative}");
+            }
+        }
+        // Resolution is a dry run: the file survives both target-selection tests.
+        assert!(path.exists());
     }
 
     #[test]

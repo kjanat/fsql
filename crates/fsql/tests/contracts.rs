@@ -539,3 +539,18 @@ fn source_relative_paths_remain_independent_in_joins() {
         ]]
     );
 }
+
+#[test]
+fn source_struct_literal_remains_compatible() {
+    let fixture = Fixture::new();
+    let source = fsql::plan::Source {
+        table: fsql::column::Table::Files,
+        root: fixture.0.clone(),
+        options: WalkOptions::default(),
+    };
+    let rows = fsql::exec::base_rows(&source)
+        .unwrap()
+        .collect::<fsql::Result<Vec<_>>>()
+        .unwrap();
+    assert!(!rows.is_empty());
+}

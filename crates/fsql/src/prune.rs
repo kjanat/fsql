@@ -14,8 +14,10 @@ pub(crate) struct Pruning {
 impl Pruning {
     pub(crate) fn for_filter(filter: Option<&Expr>, alias: &str) -> Result<Self> {
         let mut patterns = Vec::new();
-        if let Some(filter) = filter {
-            subtree_exclusions(filter, alias, &mut patterns);
+        if let Some(filter) = filter
+            && !subtree_exclusions(filter, alias, &mut patterns)
+        {
+            patterns.clear();
         }
         Ok(Self {
             excluded: if patterns.is_empty() {
@@ -42,7 +44,7 @@ impl Pruning {
 
 /// Only mandatory negative predicates can prove that descendants are excluded.
 /// In particular, never infer pruning from a directory failing a row predicate.
-fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) {
+fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) -> bool {
     use crate::expr::{constant_globs, unnest};
     match unnest(expr) {
         Expr::BinaryOp {
@@ -50,8 +52,8 @@ fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) {
             op: BinaryOperator::And,
             right,
         } => {
-            subtree_exclusions(left, alias, patterns);
-            subtree_exclusions(right, alias, patterns);
+            return subtree_exclusions(left, alias, patterns)
+                && subtree_exclusions(right, alias, patterns);
         }
         Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
@@ -74,6 +76,13 @@ fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) {
                 _ => None,
             };
             if let Some(candidates) = candidates {
+                // Never prune away rows that would expose an invalid candidate.
+                if candidates
+                    .iter()
+                    .any(|pattern| compile_glob(pattern).is_err())
+                {
+                    return false;
+                }
                 for pattern in candidates {
                     // Escapes could change the meaning of the suffix boundary.
                     if pattern.contains('\\') {
@@ -85,8 +94,7 @@ fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) {
                         // Removing a suffix can turn terminal ** into a recursive
                         // glob token with different zero-component semantics.
                         && !prefix.ends_with("**")
-                        // Validate the full pattern as well as the extracted prefix.
-                        && compile_glob(&pattern).is_ok()
+                        // Full candidates were validated atomically above.
                         && compile_glob(prefix).is_ok()
                     {
                         patterns.push(prefix.to_owned());
@@ -96,6 +104,7 @@ fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) {
         }
         _ => {}
     }
+    true
 }
 
 fn local_relative_path(expr: &Expr, alias: &str) -> bool {
@@ -146,6 +155,17 @@ mod tests {
             ("NOT (relative_path GLOB 'build\\{,/**}')", false),
         ] {
             assert_eq!(policy(sql).excludes(Path::new("build")), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn invalid_candidate_disables_all_pruning() {
+        for sql in [
+            "NOT (relative_path GLOB ANY (ARRAY['build{,/**}', '[']))",
+            "NOT (relative_path GLOB ANY (ARRAY['[', 'build{,/**}']))",
+            "NOT (relative_path GLOB 'build/**') AND NOT (relative_path GLOB ANY (ARRAY['[']))",
+        ] {
+            assert!(policy(sql).is_empty(), "{sql}");
         }
     }
 

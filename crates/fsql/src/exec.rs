@@ -18,7 +18,6 @@ use crate::plan::{
     SetBody, SetOp, Source,
 };
 use crate::value::{Value, ValueKey, row_key};
-use crate::walk::Walker;
 
 pub struct MapRow(pub HashMap<String, Value>);
 
@@ -160,6 +159,7 @@ type Scope = HashMap<String, Rc<ResultSet>>;
 pub fn base_rows<'a>(source: &Source) -> Result<RowStream<'a>> {
     base_rows_cancellable(
         source,
+        None,
         &crate::CancellationToken::default(),
         crate::prune::Pruning::default(),
     )
@@ -167,19 +167,14 @@ pub fn base_rows<'a>(source: &Source) -> Result<RowStream<'a>> {
 
 fn base_rows_cancellable<'a>(
     source: &Source,
+    filter: Option<&Expr>,
     cancellation: &crate::CancellationToken,
     pruning: crate::prune::Pruning,
 ) -> Result<RowStream<'a>> {
     if source.table == Table::Mounts {
         return crate::mounts::rows();
     }
-    let walker = Walker::cancellable_planned(
-        &source.root,
-        &source.source_root,
-        source.options.clone(),
-        pruning,
-        cancellation,
-    )?;
+    let walker = source.walker(filter, pruning, cancellation)?;
     match source.table {
         Table::Files => {
             Ok(Box::new(walker.map(|entry| {
@@ -1106,6 +1101,7 @@ fn bind<'a>(
                 .collect(),
             rows: base_rows_cancellable(
                 source,
+                filter,
                 &ctx.control.options.cancellation,
                 if source.table == Table::Files {
                     crate::prune::Pruning::for_filter(filter, alias)?
@@ -1982,6 +1978,56 @@ mod tests {
     }
 
     #[test]
+    fn narrowing_accepts_relative_and_symlink_sources() {
+        let relative = PathBuf::from(format!("target/relative-source-{}", std::process::id()));
+        std::fs::create_dir_all(relative.join("tree/src")).unwrap();
+        std::fs::write(relative.join("tree/src/file"), b"x").unwrap();
+        let canonical = std::fs::canonicalize(relative.join("tree")).unwrap();
+        std::os::unix::fs::symlink("tree", relative.join("alias")).unwrap();
+        for root in [
+            relative.join("tree"),
+            relative.join("alias"),
+            canonical.clone(),
+        ] {
+            let sql = format!(
+                "select relative_path from files('{}') where path = '{}/src/file'",
+                root.display(),
+                canonical.display()
+            );
+            let set = run_sql(&canonical, &sql).unwrap();
+            assert_eq!(texts(&set, 0), ["src/file"]);
+            let engine = crate::Engine::new(&canonical, WalkOptions::default());
+            let prepared = engine.prepare_query(&sql).unwrap();
+            let mut paths = Vec::new();
+            prepared
+                .stream(&mut |_, row| {
+                    paths.push(row[0].clone());
+                    Ok(std::ops::ControlFlow::Continue(()))
+                })
+                .unwrap();
+            assert_eq!(paths, [Value::Text("src/file".into())]);
+        }
+        std::fs::remove_dir_all(relative).unwrap();
+    }
+
+    #[test]
+    fn invalid_glob_candidates_cannot_be_hidden_by_pruning() {
+        let dir = fixture("invalid-pruning");
+        std::fs::remove_dir_all(dir.join("src")).unwrap();
+        std::fs::remove_file(dir.join("README")).unwrap();
+        for patterns in ["'build{,/**}', '['", "'[', 'build{,/**}'"] {
+            let sql = format!(
+                "select path from files where kind = 'file' and not (relative_path glob any (array[{patterns}]))"
+            );
+            assert!(matches!(
+                run_sql(&dir, &sql),
+                Err(Error::InvalidPattern { .. })
+            ));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn relative_paths_and_pruning_ignore_display_depth_offsets() {
         let dir = fixture("relative-offset");
         std::fs::create_dir_all(dir.join("src/build/nested")).unwrap();
@@ -2090,7 +2136,7 @@ mod tests {
             let pruning = crate::prune::Pruning::for_filter(select.filter.as_ref(), alias).unwrap();
             let pruned = !pruning.is_empty();
             let visited =
-                base_rows_cancellable(source, &crate::CancellationToken::default(), pruning)
+                base_rows_cancellable(source, None, &crate::CancellationToken::default(), pruning)
                     .unwrap()
                     .count();
             let unpruned = base_rows(source).unwrap().count();
