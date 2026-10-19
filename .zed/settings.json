@@ -15,6 +15,9 @@
 		}
 	],
 	"prettier": { "allowed": false },
+	"file_types": {
+		"Shell Script": ["bin/fsql"]
+	},
 	"languages": {
 		"TypeScript": {
 			"format_on_save": "on",
