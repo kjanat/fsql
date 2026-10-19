@@ -1,6 +1,6 @@
 # Layer benchmarks and profiles
 
-Run from the repository root. These are release-mode in-process probes, separate from the CLI and Criterion benchmarks. Each repository builds against its own dependency graph: fsql measures its pinned tree-fucker revision; tree-fucker measures its local library. No sibling checkout or temporary source package is required.
+Run from the repository root. These are Cargo `[[bench]]` targets with `harness = false`, using the optimized bench profile and a custom in-process measurement harness. They complement the CLI and Criterion benchmarks. Each repository builds against its own dependency graph: fsql measures its pinned tree-fucker revision; tree-fucker measures its local library. No sibling checkout or temporary source package is required.
 
 ```sh
 cargo bench:layers --test
@@ -9,6 +9,8 @@ cargo bench:layers --fixture 20000 all 15 2
 cargo bench:alloc --fixture 20000 all 3 1
 cargo bench:layers /absolute/path/to/input scan-count 25 2
 ```
+
+The aliases invoke `cargo bench --package fsql --bench layers --` and `cargo bench --package fsql --bench layers_alloc --`. The entry points and shared harness live under `benches/`. Cargo's injected `--bench` flag is accepted by the custom argument parser.
 
 The arguments are `ROOT MODE [RUNS=15] [WARMUPS=2]`, or `--fixture FILES MODE [RUNS] [WARMUPS]`. `MODE=all` runs the repository's complete layer suite sequentially. `--help` lists modes. Zero warmups are allowed; measured runs and fixture files must be positive. Input trees must remain unchanged throughout measurement.
 
@@ -40,15 +42,16 @@ Modes run sequentially with warm caches; there is no randomization, cold-cache g
 
 ## Profiling
 
-Build first, then invoke the executable directly to avoid profiling Cargo. The normal executable is `target/release/examples/layers`; the instrumented one is `target/release/examples/layers_alloc`. For symbolized profiles, build with `CARGO_PROFILE_RELEASE_DEBUG=1` (and `--package fsql` in fsql):
+Build first, then invoke the executable directly to avoid profiling Cargo. Benchmark executable paths depend on Cargo’s toolchain and build layout; obtain the exact path from its JSON artifact output instead of guessing a filename or globbing stale builds. For symbolized profiles, set `CARGO_PROFILE_BENCH_DEBUG=1` on the build command below. Use `--bench layers_alloc` to build the separate allocation executable.
 
 ```sh
-cargo build --release --example layers --locked
-mkdir -p target/benchmarks
 set -o pipefail
-perf record -o target/benchmarks/layers.perf -- target/release/examples/layers /absolute/path/to/input scan-count 100 2 2>&1 | envctl redact
+layers_bin=$(cargo bench --package fsql --bench layers --no-run --locked --message-format=json |
+  python3 -c 'import json, sys; artifacts = [json.loads(line) for line in sys.stdin]; paths = [a["executable"] for a in artifacts if a.get("reason") == "compiler-artifact" and a.get("target", {}).get("name") == "layers" and a.get("executable")]; assert len(paths) == 1, paths; print(paths[0])')
+mkdir -p target/benchmarks
+perf record -o target/benchmarks/layers.perf -- "$layers_bin" /absolute/path/to/input scan-count 100 2 2>&1 | envctl redact
 perf report --stdio -i target/benchmarks/layers.perf 2>&1 | envctl redact
-strace -c target/release/examples/layers /absolute/path/to/input scan-count 1 0 2>&1 | envctl redact
+strace -c "$layers_bin" /absolute/path/to/input scan-count 1 0 2>&1 | envctl redact
 ```
 
 Profiles and syscall totals include startup, the pre/post oracle walks, one verification traversal, warmups and measured traversals. Use enough measured iterations for CPU profiles to be dominated by the workload; **do not divide total syscall counts by RUNS and call that a single traversal**. Allocation regions exclude verification and warmups. Keep traced/instrumented results separate from normal timing. `perf`, `strace` and `envctl` are optional profiling tools, not prerequisites for the benchmarks.

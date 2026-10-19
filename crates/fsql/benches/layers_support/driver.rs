@@ -40,7 +40,11 @@ pub fn std_count(root: &Path) -> usize {
 }
 
 pub fn main(allocations: bool) {
-    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut args: Vec<_> = std::env::args_os()
+        .skip(1)
+        // Cargo passes this flag to harness-free benchmark executables too.
+        .filter(|arg| arg != "--bench")
+        .collect();
     if args.is_empty() || args[0] == "--help" {
         println!(
             "Usage: ROOT MODE [RUNS=15] [WARMUPS=2]\n       --fixture FILES MODE [RUNS=15] [WARMUPS=2]\n       --test\nUse MODE=all to run every mode.\nModes: {}\nResults are TSV on stdout; diagnostics on stderr. Output goes to the OS null device. Allocation executable reports allocations separately; its timings are not comparable.",
@@ -68,8 +72,8 @@ pub fn main(allocations: bool) {
         "see --help"
     );
     let fixture = if smoke || generated {
-        let base = Path::new("target/benchmarks");
-        std::fs::create_dir_all(base).unwrap();
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/benchmarks");
+        std::fs::create_dir_all(&base).unwrap();
         let fixture = tempfile::Builder::new()
             .prefix("layers-")
             .tempdir_in(base)

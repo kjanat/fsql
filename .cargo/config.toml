@@ -1,8 +1,8 @@
 #:schema https://raw.githubusercontent.com/kjanat/cargo-config-schema/refs/heads/master/cargo-config.json
 
 [alias]
-"bench:alloc"  = "run --release --package fsql --example layers_alloc --locked --"
-"bench:layers" = "run --release --package fsql --example layers --locked --"
+"bench:alloc"  = "bench --package fsql --bench layers_alloc --locked --"
+"bench:layers" = "bench --package fsql --bench layers --locked --"
 rr             = ["run", "--release"]
 
 "build:cli"        = ["build", "--release", "--package", "fsql-cli"]
