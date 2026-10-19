@@ -173,8 +173,13 @@ fn base_rows_cancellable<'a>(
     if source.table == Table::Mounts {
         return crate::mounts::rows();
     }
-    let walker =
-        Walker::cancellable_planned(&source.root, source.options.clone(), pruning, cancellation)?;
+    let walker = Walker::cancellable_planned(
+        &source.root,
+        &source.source_root,
+        source.options.clone(),
+        pruning,
+        cancellation,
+    )?;
     match source.table {
         Table::Files => {
             Ok(Box::new(walker.map(|entry| {
@@ -1974,6 +1979,33 @@ mod tests {
 
     fn texts(set: &ResultSet, column: usize) -> Vec<String> {
         set.rows.iter().map(|r| render(&r[column])).collect()
+    }
+
+    #[test]
+    fn relative_paths_and_pruning_ignore_display_depth_offsets() {
+        let dir = fixture("relative-offset");
+        std::fs::create_dir_all(dir.join("src/build/nested")).unwrap();
+        std::fs::write(dir.join("src/build/nested/hidden.rs"), b"x").unwrap();
+        let planner = Planner::new(
+            &dir,
+            WalkOptions {
+                initial_depth: 2,
+                ..WalkOptions::default()
+            },
+        );
+        for (sql, expected) in [
+            ("select relative_path from files where depth = 2".to_owned(), vec![""]),
+            (format!("select relative_path from files where path glob '{}/src/**' and not (relative_path glob any (array['**/build{{,/**}}'])) order by relative_path", dir.display()), vec!["src/lib.rs", "src/main.rs"]),
+            (format!("select depth from files where path = '{}/src/main.rs'", dir.display()), vec!["4"]),
+            ("select relative_path from files where not (relative_path glob 'build{,/**}') and name = 'build' order by relative_path".to_owned(), vec!["src/build"]),
+        ] {
+            let Plan::Select(plan) = planner.plan(&sql).unwrap().remove(0) else {
+                panic!("select");
+            };
+            let set = run(&plan, &planner, &mut |error| panic!("{error}")).unwrap();
+            assert_eq!(texts(&set, 0), expected, "{sql}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

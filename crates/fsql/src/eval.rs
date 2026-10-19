@@ -270,6 +270,18 @@ impl Evaluator {
         row: &dyn Row,
         any: bool,
     ) -> Result<Value> {
+        if !matches!(
+            op,
+            BinaryOperator::Glob
+                | BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Gt
+                | BinaryOperator::Lt
+                | BinaryOperator::GtEq
+                | BinaryOperator::LtEq
+        ) {
+            return Err(Error::Unsupported(format!("quantified operator `{op}`")));
+        }
         let subject = self.eval(left, row)?;
         let right = unnest(right);
         if any
@@ -861,7 +873,8 @@ fn compare(op: &BinaryOperator, l: Value, r: Value) -> Result<Value> {
         BinaryOperator::Gt => ordering.is_gt(),
         BinaryOperator::Lt => ordering.is_lt(),
         BinaryOperator::GtEq => ordering.is_ge(),
-        _ => ordering.is_le(),
+        BinaryOperator::LtEq => ordering.is_le(),
+        _ => return Err(Error::Unsupported(format!("comparison operator `{op}`"))),
     }))
 }
 
@@ -1374,6 +1387,42 @@ mod tests {
 
     fn truth(sql: &str) -> Option<bool> {
         eval(sql).expect(sql).truth()
+    }
+
+    #[test]
+    fn quantified_operators_are_explicit() {
+        for sql in [
+            "'a' ~ ANY (ARRAY['z'])",
+            "'a' ~ ALL (ARRAY[])",
+            "NULL ~ ANY (ARRAY[])",
+            "'a' ~ ANY (ARRAY[NULL])",
+        ] {
+            assert!(matches!(eval(sql), Err(Error::Unsupported(_))), "{sql}");
+        }
+        for op in ["=", "<>", ">", "<", ">=", "<="] {
+            assert_eq!(truth(&format!("1 {op} ANY (ARRAY[])")), Some(false));
+            assert_eq!(truth(&format!("1 {op} ALL (ARRAY[])")), Some(true));
+        }
+        assert_eq!(truth("2 <= ANY (ARRAY[1, 2])"), Some(true));
+        assert_eq!(truth("2 < ALL (ARRAY[2, 3])"), Some(false));
+    }
+
+    #[test]
+    fn empty_glob_alternatives_match_directories_and_descendants() {
+        for value in ["target", "target/file", "src/target", "src/target/file"] {
+            for predicate in [
+                "GLOB '**/target{,/**}'",
+                "GLOB ANY (ARRAY['**/target{,/**}'])",
+                "GLOB ALL (ARRAY['**/target{,/**}'])",
+            ] {
+                assert_eq!(truth(&format!("'{value}' {predicate}")), Some(true));
+            }
+        }
+        assert_eq!(truth("'target-other' GLOB '**/target{,/**}'"), Some(false));
+        assert_eq!(
+            truth("'x.tmp' GLOB ANY (ARRAY[name || '{,/**}'])"),
+            Some(true)
+        );
     }
 
     #[test]

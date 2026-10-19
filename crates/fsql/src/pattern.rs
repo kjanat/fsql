@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 pub(crate) fn compile_glob(pattern: &str) -> Result<Glob> {
     GlobBuilder::new(pattern)
         .literal_separator(false)
+        .empty_alternates(true)
         .build()
         .map_err(|error| Error::InvalidPattern {
             pattern: pattern.to_owned(),

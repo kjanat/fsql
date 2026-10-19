@@ -31,6 +31,7 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
 pub struct WalkOptions {
     pub max_depth: Option<u32>,
     pub one_filesystem: bool,
+    /// Offset applied to reported depths; does not change the source-relative path.
     pub initial_depth: u32,
 }
 
@@ -153,10 +154,15 @@ pub struct Walker {
 
 impl Walker {
     pub fn new(root: &Path, options: WalkOptions) -> Result<Self> {
-        Self::planned(root, options, Pruning::default())
+        Self::planned(root, root, options, Pruning::default())
     }
 
-    fn planned(root: &Path, options: WalkOptions, pruning: Pruning) -> Result<Self> {
+    fn planned(
+        root: &Path,
+        source_root: &Path,
+        options: WalkOptions,
+        pruning: Pruning,
+    ) -> Result<Self> {
         if recovery_path(root) {
             return Err(Error::Plan(
                 "private recovery directories cannot be queried".into(),
@@ -166,12 +172,11 @@ impl Walker {
             .max_depth
             .map(|max| max.saturating_sub(options.initial_depth) as usize);
         // A narrowed scan still uses paths relative to the original source.
-        let components: Vec<_> = root.components().collect();
-        let prefix: PathBuf = components[components
-            .len()
-            .saturating_sub(options.initial_depth as usize)..]
-            .iter()
-            .collect();
+        let prefix = root
+            .strip_prefix(source_root)
+            .map_err(|_| Error::Plan("scan root is outside the source root".into()))?
+            .to_path_buf();
+        let narrowed_depth = prefix.components().count();
         let policy: Arc<dyn ScanPolicy> =
             Arc::new(PathPredicate::new(move |path: &RelativePath, _| {
                 if path.file_name().is_some_and(recovery_name) {
@@ -207,7 +212,7 @@ impl Walker {
         }
         let source_root = root
             .ancestors()
-            .nth(options.initial_depth as usize)
+            .nth(narrowed_depth)
             .unwrap_or(Path::new("/"))
             .to_path_buf();
         Ok(Self {
@@ -226,11 +231,12 @@ impl Walker {
         options: WalkOptions,
         cancellation: &crate::CancellationToken,
     ) -> Result<Self> {
-        Self::cancellable_planned(root, options, Pruning::default(), cancellation)
+        Self::cancellable_planned(root, root, options, Pruning::default(), cancellation)
     }
 
     pub(crate) fn cancellable_planned(
         root: &Path,
+        source_root: &Path,
         options: WalkOptions,
         pruning: Pruning,
         cancellation: &crate::CancellationToken,
@@ -238,7 +244,7 @@ impl Walker {
         if cancellation.is_cancelled() {
             return Err(Error::ResourceLimit("cancelled".into()));
         }
-        let mut walker = Self::planned(root, options, pruning)?;
+        let mut walker = Self::planned(root, source_root, options, pruning)?;
         walker.cancellation = Some(cancellation.register(walker.scan.cancellation()));
         Ok(walker)
     }
@@ -509,6 +515,13 @@ mod tests {
                 .any(|row| row.name() == "sub" && row.depth() == 3)
         );
         assert!(rows.iter().all(|row| row.depth() <= 3));
+        assert!(
+            rows.iter()
+                .any(|row| row.depth() == 2 && row.relative_path().as_os_str().is_empty())
+        );
+        for row in &rows {
+            assert_eq!(row.relative_path(), row.path().strip_prefix(&dir).unwrap());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

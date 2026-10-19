@@ -20,6 +20,8 @@ use crate::walk::WalkOptions;
 pub struct Source {
     pub table: Table,
     pub root: PathBuf,
+    /// Original source root, retained when the scan root is narrowed.
+    pub source_root: PathBuf,
     pub options: WalkOptions,
 }
 
@@ -486,7 +488,7 @@ impl Planner {
             && let Some((root, depth)) = narrow(&source.root, filter)
         {
             source.root = root;
-            source.options.initial_depth = depth;
+            source.options.initial_depth = source.options.initial_depth.saturating_add(depth);
         }
         let projection = select
             .projection
@@ -618,6 +620,7 @@ impl Planner {
                 Ok(Relation::Table {
                     source: Source {
                         table,
+                        source_root: root.clone(),
                         root,
                         options: self.options.clone(),
                     },
@@ -662,7 +665,7 @@ impl Planner {
             && let Some((root, depth)) = narrow(&source.root, filter)
         {
             source.root = root;
-            source.options.initial_depth = depth;
+            source.options.initial_depth = source.options.initial_depth.saturating_add(depth);
         }
         Ok((source, alias))
     }
