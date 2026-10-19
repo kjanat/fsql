@@ -20,6 +20,7 @@ class HarnessTests(unittest.TestCase):
         (self.root / "\n").write_text("single newline")
         (self.root / "carriage\rreturn.rs").write_text("carriage")
         (self.root / ".ignore").write_text("*.rs\n")
+        (self.root / "uppercase.RS").write_text("case sensitive")
         (self.root / "edge").write_bytes(b"x" * 100)
         (self.root / "above").write_bytes(b"x" * 101)
         (self.root / "edge-link").symlink_to("above")
@@ -38,7 +39,7 @@ class HarnessTests(unittest.TestCase):
                         "fsql", str(binary), case, self.root, 100, legacy
                     )
                     bench.verify(command, self.root, 10, reference)
-            for tool in ["find", "fd", "ls"]:
+            for tool in ["find", "fd", "ls", "bfs", "fselect"]:
                 if not (tool_binary := shutil.which(tool)):
                     continue
                 command = bench.tool_command(tool, tool_binary, case, self.root, 100, 1)

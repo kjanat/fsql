@@ -10,6 +10,10 @@ license.workspace    = true
 harness = false
 name    = "engine"
 
+[[bench]]
+harness = false
+name    = "traversal"
+
 [dependencies]
 sqlparser.workspace   = true
 tree-fucker.workspace = true
@@ -23,7 +27,10 @@ uzers.workspace      = true
 
 [dev-dependencies]
 criterion.workspace = true
+ignore.workspace    = true
+jwalk.workspace     = true
 tempfile.workspace  = true
+walkdir.workspace   = true
 
 [lints]
 workspace = true

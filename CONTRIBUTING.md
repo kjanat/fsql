@@ -37,7 +37,7 @@ The [filesystem benchmark harness](benchmarks/README.md) compares complete comma
 
 ```sh
 cargo build:cli:locked
-python3 benchmarks/run.py
+uv run bench
 cargo bench:engine policy
 cargo bench:engine pruning
 cargo bench:engine relational

@@ -141,7 +141,7 @@ def fsql_command(
 def tool_command(
     name: str, binary: str, case: str, root: Path, size: int, threads: int | None
 ) -> Command | None:
-    if name == "find":
+    if name in ("find", "bfs"):
         argv = [binary, "-P", ".", "-mindepth", "1"]
         if case == "shallow":
             argv += ["-maxdepth", "1"]
@@ -165,6 +165,27 @@ def tool_command(
                 "-o",
             ]
         return Command(name, case, argv + ["-print0"], "nul")
+    if name == "fselect":
+        query = "path from . nogitignore nohgignore nodockerignore"
+        if case == "shallow":
+            query += " maxdepth 1"
+        elif case == "size":
+            query += f" where is_file = true and is_symlink = false and size > {size}"
+        elif case == "suffix":
+            query += " where path =~ '[.]rs$'"
+        elif case == "exclude":
+            query += " where path notrx '(^|/)([.]git|target|node_modules)(/|$)'"
+        return Command(
+            name,
+            case,
+            [
+                binary,
+                "--config",
+                str(REPO / "benchmarks/fselect.toml"),
+                query + " into list",
+            ],
+            "nul",
+        )
     if name == "fd":
         argv = [
             binary,
@@ -388,7 +409,10 @@ def main() -> int:
         help="pre-PR8 executable; exclusion uses a regex",
     )
     parser.add_argument(
-        "--tools", nargs="*", choices=["find", "fd", "ls"], default=["find", "fd", "ls"]
+        "--tools",
+        nargs="*",
+        choices=["find", "fd", "ls", "bfs", "fselect"],
+        default=["find", "fd", "ls", "bfs", "fselect"],
     )
     parser.add_argument(
         "--adapter",

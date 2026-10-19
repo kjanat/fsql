@@ -23,10 +23,10 @@ jobs:
           - &toolchain
             name: Install Rust toolchain
             run: rustup toolchain install
-          - &runner
-            name: Setup runner-run
-            uses: kjanat/runner@b32ea932a1813ae0be44e755c16df9f9f5ca86a4 # master
-            with: &tv { version-file: .tool-versions }
+          - &mise
+            name: Install tools from .tool-versions
+            uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
+            with: { install: true }
       - name: Test
         run: run test:workspace
       - name: Build Zed WASM adapter
@@ -46,9 +46,7 @@ jobs:
     steps:
       - *checkout
       - parallel:
-          - *runner
-          - uses: kjanat/setup-tombi@fa7a237e9661f88c78309b5214f4eb7cf0c7c5f6 # master
-            with: *tv
+          - *mise
           - name: Install rustfmt
             run: rustup component add rustfmt
       - name: Check formatting
@@ -65,23 +63,20 @@ jobs:
     timeout-minutes: 20
     cancel-timeout-minutes: 5
     steps:
-      - parallel:
-          - *checkout
-          - name: Install fd for benchmark comparisons
-            run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends fd-find;
-              sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd; fd --version
+      - *checkout
       - parallel:
           - *toolchain
-          - *runner
-          - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-          - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-            with: { python-version-file: ".python-version" }
+          - *mise
+      - name: Verify benchmark tools
+        run: |
+          # shellcheck disable=SC2312
+          column -t <(fd --version | head -1 ; bfs -version | head -1 ; fselect --version | head -1) | sort
       - name: Build benchmark CLI
         id: build_cli
         run: run build:cli
       - name: Benchmark harness contracts
         if: &builtCli ${{ !cancelled() && steps.build_cli.outcome == 'success' }}
-        run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
+        run: uv run python -m unittest discover -s benchmarks -p 'test_*.py'
       - name: CLI benchmark correctness (no performance thresholds)
         if: *builtCli
         run: run bench
@@ -91,3 +86,6 @@ jobs:
       - name: Rust benchmark correctness
         if: *notCancelled
         run: run bench:engine --test
+      - name: Rust traversal benchmark correctness
+        if: *notCancelled
+        run: run bench:traversal --test

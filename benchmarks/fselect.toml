@@ -1,0 +1,7 @@
+no_color          = true
+gitignore         = false
+hgignore          = false
+dockerignore      = false
+check_for_updates = false
+everything        = false
+plocate           = false
