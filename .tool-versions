@@ -1,4 +1,4 @@
-vfox:jdx/vfox-bfs                       latest
+bun                                     1.4
 github:astral-sh/ruff                   latest
 github:astral-sh/ty                     latest
 github:astral-sh/uv                     latest
@@ -10,3 +10,4 @@ github:sharkdp/fd                       latest
 github:tombi-toml/tombi                 1.8
 go                                      1.27
 go:actionlint.kjanat.dev/cmd/actionlint fuck-it
+vfox:jdx/vfox-bfs                       latest

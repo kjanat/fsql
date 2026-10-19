@@ -45,10 +45,7 @@ jobs:
     cancel-timeout-minutes: 1
     steps:
       - *checkout
-      - parallel:
-          - *mise
-          - name: Install rustfmt
-            run: rustup component add rustfmt
+      - parallel: [*toolchain, *mise]
       - name: Check formatting
         uses: kjanat/dprint-check@29c42153a7346f4d7315883ff7722cfe22cd510c # v3
 
@@ -64,9 +61,7 @@ jobs:
     cancel-timeout-minutes: 5
     steps:
       - *checkout
-      - parallel:
-          - *toolchain
-          - *mise
+      - parallel: [*toolchain, *mise]
       - name: Verify benchmark tools
         run: |
           # shellcheck disable=SC2312
