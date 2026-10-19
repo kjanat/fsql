@@ -461,9 +461,19 @@ fn expression(
     aggregates: bool,
 ) -> Result<()> {
     let mut result = Ok(());
-    let mut quantified_arrays: Vec<&Expr> = Vec::new();
     visit(expr, &mut |node| {
         if result.is_err() {
+            return false;
+        }
+        if let Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } = node {
+            result = expression(left, schema, planner, scope, aggregates).and_then(|()| {
+                match crate::expr::unnest(right) {
+                    Expr::Array(array) => array.elem.iter().try_for_each(|element| {
+                        expression(element, schema, planner, scope, aggregates)
+                    }),
+                    operand => expression(operand, schema, planner, scope, aggregates),
+                }
+            });
             return false;
         }
         result = (|| -> Result<()> {
@@ -471,13 +481,6 @@ fn expression(
                 schema.column(&name)?;
             }
             match node {
-                Expr::AnyOp { right, .. } | Expr::AllOp { right, .. } => {
-                    quantified_arrays.push(crate::eval::unnest(right));
-                }
-                Expr::Array(_)
-                    if quantified_arrays
-                        .iter()
-                        .any(|array| std::ptr::eq(*array, node)) => {}
                 Expr::Function(function) => {
                     function_shape(function)?;
                     if is_aggregate(&function.name.to_string()) {

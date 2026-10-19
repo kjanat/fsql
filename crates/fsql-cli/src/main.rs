@@ -181,7 +181,6 @@ fn run(cli: Cli) -> Result<ExitCode, Error> {
             max_depth: cli.max_depth,
             one_filesystem: cli.one_file_system,
             initial_depth: 0,
-            ..WalkOptions::default()
         },
     );
     let mut scripts: Vec<String> = cli.execute.clone();

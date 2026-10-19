@@ -131,6 +131,8 @@ pub struct Entry {
     full: OnceCell<CString>,
     name: CString,
     path: PathBuf,
+    // Byte boundary of the original source root in the absolute path.
+    relative_start: usize,
     depth: u32,
     kind_hint: Kind,
     stat: OnceCell<std::result::Result<Statx, rustix::io::Errno>>,
@@ -145,6 +147,26 @@ impl Entry {
         depth: u32,
         kind_hint: Kind,
     ) -> Result<Self> {
+        let root = path
+            .ancestors()
+            .nth(depth as usize)
+            .unwrap_or(Path::new("/"))
+            .to_path_buf();
+        Self::rooted(shared, anchor, path, &root, depth, kind_hint)
+    }
+
+    pub(crate) fn rooted(
+        shared: Rc<Shared>,
+        anchor: Option<Anchor>,
+        path: PathBuf,
+        source_root: &Path,
+        depth: u32,
+        kind_hint: Kind,
+    ) -> Result<Self> {
+        let relative = path
+            .strip_prefix(source_root)
+            .map_err(|_| Error::Plan("entry is outside its source root".into()))?;
+        let relative_start = path.as_os_str().len() - relative.as_os_str().len();
         let nul = |path: &Path| Error::Io {
             path: path.to_path_buf(),
             source: std::io::Error::other("path contains a NUL byte"),
@@ -160,6 +182,7 @@ impl Entry {
             full: OnceCell::new(),
             name,
             path,
+            relative_start,
             depth,
             kind_hint,
             stat: OnceCell::new(),
@@ -173,6 +196,13 @@ impl Entry {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Path relative to the original source root, empty for the root row.
+    pub fn relative_path(&self) -> &Path {
+        Path::new(OsStr::from_bytes(
+            &self.path.as_os_str().as_bytes()[self.relative_start..],
+        ))
     }
 
     pub fn anchored(&self) -> bool {
@@ -310,14 +340,7 @@ impl Row for Entry {
     fn column(&self, name: &str) -> Result<Value> {
         let column = Column::parse(name).ok_or_else(|| Error::UnknownColumn(name.to_owned()))?;
         Ok(match column {
-            Column::RelativePath => {
-                let components: Vec<_> = self.path.components().collect();
-                let relative: PathBuf = components
-                    [components.len().saturating_sub(self.depth as usize)..]
-                    .iter()
-                    .collect();
-                from_bytes(relative.as_os_str().as_bytes())
-            }
+            Column::RelativePath => from_bytes(self.relative_path().as_os_str().as_bytes()),
             Column::Path => from_bytes(self.path.as_os_str().as_bytes()),
             Column::Name => from_bytes(self.name.as_bytes()),
             Column::Parent => self

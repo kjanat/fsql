@@ -158,17 +158,23 @@ pub struct Context {
 type Scope = HashMap<String, Rc<ResultSet>>;
 
 pub fn base_rows<'a>(source: &Source) -> Result<RowStream<'a>> {
-    base_rows_cancellable(source, &crate::CancellationToken::default())
+    base_rows_cancellable(
+        source,
+        &crate::CancellationToken::default(),
+        crate::prune::Pruning::default(),
+    )
 }
 
 fn base_rows_cancellable<'a>(
     source: &Source,
     cancellation: &crate::CancellationToken,
+    pruning: crate::prune::Pruning,
 ) -> Result<RowStream<'a>> {
     if source.table == Table::Mounts {
         return crate::mounts::rows();
     }
-    let walker = Walker::cancellable(&source.root, source.options.clone(), cancellation)?;
+    let walker =
+        Walker::cancellable_planned(&source.root, source.options.clone(), pruning, cancellation)?;
     match source.table {
         Table::Files => {
             Ok(Box::new(walker.map(|entry| {
@@ -296,7 +302,13 @@ pub fn stream(
     if plan.limit == Some(0) {
         return Ok(Completion::default());
     }
-    let bound = bind(&select.from[0].relation, &ctx, &Scope::new(), None)?;
+    let bound = bind(
+        &select.from[0].relation,
+        &ctx,
+        &Scope::new(),
+        None,
+        select.filter.as_ref(),
+    )?;
     let prepared = prepare(select, &[(bound.alias.clone(), bound.columns)])?;
     let mut evaluator = evaluator(&ctx, &Scope::new());
     let mut skipped = 0;
@@ -1076,6 +1088,7 @@ fn bind<'a>(
     ctx: &Rc<Context>,
     scope: &Scope,
     outer: Option<&'a dyn Row>,
+    filter: Option<&Expr>,
 ) -> Result<Bound<'a>> {
     match relation {
         Relation::Table { source, alias } => Ok(Bound {
@@ -1086,7 +1099,15 @@ fn bind<'a>(
                 .iter()
                 .map(|c| (*c).to_owned())
                 .collect(),
-            rows: base_rows_cancellable(source, &ctx.control.options.cancellation)?,
+            rows: base_rows_cancellable(
+                source,
+                &ctx.control.options.cancellation,
+                if source.table == Table::Files {
+                    crate::prune::Pruning::for_filter(filter, alias)?
+                } else {
+                    crate::prune::Pruning::default()
+                },
+            )?,
         }),
         Relation::Cte { name, alias } => {
             let set = scope
@@ -1521,7 +1542,13 @@ fn select_rows(
             outer,
         ))))
     } else if streaming {
-        let bound = bind(&plan.from[0].relation, ctx, scope, outer)?;
+        let bound = bind(
+            &plan.from[0].relation,
+            ctx,
+            scope,
+            outer,
+            plan.filter.as_ref(),
+        )?;
         relations.push((bound.alias.clone(), bound.columns.clone()));
         let alias = bound.alias;
         Box::new(
@@ -1533,7 +1560,7 @@ fn select_rows(
         let mut product: Vec<JoinRow<'_>> = Vec::new();
         let mut first = true;
         for clause in &plan.from {
-            let bound = bind(&clause.relation, ctx, scope, outer)?;
+            let bound = bind(&clause.relation, ctx, scope, outer, None)?;
             relations.push((bound.alias.clone(), bound.columns.clone()));
             let alias = bound.alias.clone();
             let (base, base_names) = materialize(bound, &names, ctx)?;
@@ -1547,7 +1574,7 @@ fn select_rows(
                 })
                 .collect();
             for spec in &clause.joins {
-                let bound = bind(&spec.relation, ctx, scope, outer)?;
+                let bound = bind(&spec.relation, ctx, scope, outer, None)?;
                 relations.push((bound.alias.clone(), bound.columns.clone()));
                 let right_alias = bound.alias.clone();
                 let (right, right_names) = materialize(bound, &names, ctx)?;
@@ -1999,6 +2026,9 @@ mod tests {
             "NOT (relative_path GLOB ANY (ARRAY['**/build/**'])) AND kind = 'file'",
             "NOT (relative_path GLOB 'build{,/**}')",
             "NOT (name GLOB ANY (ARRAY['build{,/**}']))",
+            "NOT (relative_path GLOB '**{,/**}')",
+            "NOT (relative_path GLOB 'build/**{,/**}')",
+            "NOT (relative_path GLOB '**/*{,/**}')",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -2022,21 +2052,66 @@ mod tests {
             let SetBody::Select(select) = &mut plan.body else {
                 panic!("select");
             };
-            let Relation::Table { source, .. } = &mut select.from[0].relation else {
+            let Relation::Table { source, alias } = &select.from[0].relation else {
                 panic!("table");
             };
-            let pruned = !source.options.excluded_subtrees.is_empty();
-            let visited = base_rows(source).unwrap().count();
-            source.options.excluded_subtrees.clear();
+            let pruning = crate::prune::Pruning::for_filter(select.filter.as_ref(), alias).unwrap();
+            let pruned = !pruning.is_empty();
+            let visited =
+                base_rows_cancellable(source, &crate::CancellationToken::default(), pruning)
+                    .unwrap()
+                    .count();
             let unpruned = base_rows(source).unwrap().count();
             if pruned {
                 assert!(visited < unpruned, "{filter}");
             } else {
                 assert_eq!(visited, unpruned);
             }
+            // IS TRUE preserves WHERE truth semantics while deliberately
+            // preventing the conservative optimizer from recognizing this filter.
+            select.filter = select
+                .filter
+                .take()
+                .map(|filter| Expr::IsTrue(Box::new(filter)));
             let plain = run(&plan, &planner, &mut |e| panic!("{e}")).unwrap();
             assert_eq!(optimized.rows, plain.rows, "{filter}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn quantified_glob_subqueries_use_normal_query_semantics() {
+        let dir = fixture("glob-subqueries");
+        for (sql, expected) in [
+            (
+                "select 'main.rs' glob any (select '*.rs')",
+                Value::Bool(true),
+            ),
+            (
+                "select 'main.rs' glob some (values ('*.rs'), ('*.txt'))",
+                Value::Bool(true),
+            ),
+            (
+                "select 'main.rs' glob all (select '*.txt')",
+                Value::Bool(false),
+            ),
+            (
+                "select 'main.rs' glob any (select name from files where false)",
+                Value::Bool(false),
+            ),
+            (
+                "select 'main.rs' glob all (select name from files where false)",
+                Value::Bool(true),
+            ),
+            (
+                "select 'main.rs' glob any (with patterns as (select '*.rs' as pattern) select pattern from patterns)",
+                Value::Bool(true),
+            ),
+        ] {
+            assert_eq!(run_sql(&dir, sql).unwrap().rows, [vec![expected]], "{sql}");
+        }
+        let set = run_sql(&dir, "select f.relative_path from files f where f.kind = 'file' and f.name glob any (select '*.rs' where f.ext = 'rs') order by f.relative_path").unwrap();
+        assert_eq!(texts(&set, 0), ["src/lib.rs", "src/main.rs"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

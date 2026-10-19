@@ -19,6 +19,7 @@ use tree_fucker::std_fs::StdFileSystem;
 use tree_fucker::{HostConfig, HostGovernor, HostGovernorError};
 
 use crate::error::{Error, Result};
+use crate::prune::Pruning;
 use crate::row::{Entry, Kind, Shared};
 
 const DIR_FLAGS: OFlags = OFlags::RDONLY
@@ -31,9 +32,6 @@ pub struct WalkOptions {
     pub max_depth: Option<u32>,
     pub one_filesystem: bool,
     pub initial_depth: u32,
-    /// Relative directory globs proven to reject every descendant. Directory
-    /// rows are still emitted and evaluated by the query's complete filter.
-    pub excluded_subtrees: Vec<String>,
 }
 
 /// Private recovery directories reserve `.fsql-<hex>-<hex>-<decimal>` names.
@@ -148,12 +146,17 @@ pub struct Walker {
     scan: Scan,
     root: PathBuf,
     initial_depth: u32,
+    source_root: PathBuf,
     directory: Option<(RelativePath, PathBuf)>,
     cancellation: Option<crate::execution::ScanCancellation>,
 }
 
 impl Walker {
     pub fn new(root: &Path, options: WalkOptions) -> Result<Self> {
+        Self::planned(root, options, Pruning::default())
+    }
+
+    fn planned(root: &Path, options: WalkOptions, pruning: Pruning) -> Result<Self> {
         if recovery_path(root) {
             return Err(Error::Plan(
                 "private recovery directories cannot be queried".into(),
@@ -162,7 +165,6 @@ impl Walker {
         let depth = options
             .max_depth
             .map(|max| max.saturating_sub(options.initial_depth) as usize);
-        let excluded = crate::eval::compile_globs(&options.excluded_subtrees)?;
         // A narrowed scan still uses paths relative to the original source.
         let components: Vec<_> = root.components().collect();
         let prefix: PathBuf = components[components
@@ -177,7 +179,7 @@ impl Walker {
                 } else {
                     ScanDecision::Eligible {
                         initially_loaded: depth.is_none_or(|max| path.depth() < max)
-                            && (excluded.is_empty() || !excluded.is_match(path.under(&prefix))),
+                            && (pruning.is_empty() || !pruning.excludes(&path.under(&prefix))),
                     }
                 }
             }));
@@ -203,11 +205,17 @@ impl Walker {
                 "private recovery directories cannot be queried".into(),
             ));
         }
+        let source_root = root
+            .ancestors()
+            .nth(options.initial_depth as usize)
+            .unwrap_or(Path::new("/"))
+            .to_path_buf();
         Ok(Self {
             shared: Shared::new(),
             scan,
             root,
             initial_depth: options.initial_depth,
+            source_root,
             directory: None,
             cancellation: None,
         })
@@ -218,10 +226,19 @@ impl Walker {
         options: WalkOptions,
         cancellation: &crate::CancellationToken,
     ) -> Result<Self> {
+        Self::cancellable_planned(root, options, Pruning::default(), cancellation)
+    }
+
+    pub(crate) fn cancellable_planned(
+        root: &Path,
+        options: WalkOptions,
+        pruning: Pruning,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<Self> {
         if cancellation.is_cancelled() {
             return Err(Error::ResourceLimit("cancelled".into()));
         }
-        let mut walker = Self::new(root, options)?;
+        let mut walker = Self::planned(root, options, pruning)?;
         walker.cancellation = Some(cancellation.register(walker.scan.cancellation()));
         Ok(walker)
     }
@@ -242,10 +259,11 @@ impl Walker {
     fn entry(&mut self, entry: ScanEntry) -> Result<Entry> {
         let depth = u32::try_from(entry.path.depth()).unwrap_or(u32::MAX);
         let path = self.absolute(&entry);
-        Entry::new(
+        Entry::rooted(
             self.shared.clone(),
             entry.anchor,
             path,
+            &self.source_root,
             self.initial_depth.saturating_add(depth),
             kind_of(entry.kind),
         )

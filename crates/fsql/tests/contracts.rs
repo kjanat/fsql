@@ -113,7 +113,6 @@ fn one_filesystem_cannot_be_bypassed_by_an_exact_path_predicate() {
             one_filesystem: true,
             max_depth: Some(3),
             initial_depth: 0,
-            ..WalkOptions::default()
         },
     );
     let result = engine
@@ -476,5 +475,67 @@ fn group_keys_are_budgeted_even_when_having_discards_every_group() {
             .0
             .rows
             .is_empty()
+    );
+}
+
+#[test]
+fn relative_paths_and_pruning_agree_in_streaming_and_collected_queries() {
+    let fx = Fixture::new();
+    fs::create_dir_all(fx.path("build/deep")).unwrap();
+    fs::create_dir_all(fx.path("src")).unwrap();
+    fs::write(fx.path("build/deep/discard.rs"), b"x").unwrap();
+    fs::write(fx.path("src/keep.rs"), b"x").unwrap();
+    std::os::unix::fs::symlink("src/keep.rs", fx.path("link")).unwrap();
+    // Keep the original public struct-literal API working without optimizer fields.
+    let engine = Engine::new(
+        &fx.0,
+        WalkOptions {
+            max_depth: None,
+            one_filesystem: false,
+            initial_depth: 0,
+        },
+    );
+    let query = engine.prepare_query(
+        "select relative_path from files where kind in ('file', 'symlink') and not (relative_path glob any (array['build{,/**}']))"
+    ).unwrap();
+    let (collected, completion) = query.collect().unwrap();
+    assert_eq!(completion.rows, 2);
+    let mut streamed = Vec::new();
+    query
+        .stream(&mut |_, row| {
+            streamed.push(row.to_vec());
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap();
+    let mut collected = collected.rows;
+    streamed.sort_by_key(|row| format!("{row:?}"));
+    collected.sort_by_key(|row| format!("{row:?}"));
+    assert_eq!(streamed, collected);
+    assert_eq!(
+        streamed,
+        [
+            vec![Value::Text("link".into())],
+            vec![Value::Text("src/keep.rs".into())]
+        ]
+    );
+}
+
+#[test]
+fn source_relative_paths_remain_independent_in_joins() {
+    let fx = Fixture::new();
+    fs::create_dir_all(fx.path("left")).unwrap();
+    fs::create_dir_all(fx.path("right/nested")).unwrap();
+    fs::write(fx.path("left/a"), b"x").unwrap();
+    fs::write(fx.path("right/nested/b"), b"x").unwrap();
+    let (set, _) = fx.engine().prepare_query(&format!(
+        "select l.relative_path, r.relative_path from files('{}') l cross join files('{}') r where l.kind = 'file' and r.kind = 'file'",
+        fx.path("left").display(), fx.path("right").display()
+    )).unwrap().collect().unwrap();
+    assert_eq!(
+        set.rows,
+        [vec![
+            Value::Text("a".into()),
+            Value::Text("nested/b".into())
+        ]]
     );
 }

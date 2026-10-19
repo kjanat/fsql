@@ -137,9 +137,13 @@ WHERE kind IN ('file', 'symlink')
   ]));
 ```
 
-Constant string arrays compile into a cached glob set. Empty arrays match nothing; a NULL subject or an unmatched array containing NULL produces NULL. A match wins over NULL array elements. Array elements may also be expressions.
+`GLOB SOME` is an alias for `GLOB ANY`; `GLOB ALL` requires every pattern to match. Each accepts an array or a one-column subquery, including correlated subqueries. For example, `name GLOB ANY (SELECT pattern FROM patterns)` uses a query-defined pattern collection.
 
-For a single `files` source, mandatory `NOT (relative_path GLOB ...)` and `NOT (relative_path GLOB ANY (...))` filters can prune traversal. Constant patterns ending in `{,/**}` or `/**` prove that every descendant of a matching directory is excluded. The directory row itself is still evaluated normally. Other patterns, filename filters, and exclusions inside `OR` do not trigger pruning. This is a conservative SQL optimization; it does not read Git's index or ignore files.
+Constant string arrays for `ANY`/`SOME` compile into a cached glob set without rebuilding pattern strings for each row. Dynamic array elements are evaluated for each row. Empty arrays/subqueries give false for `ANY` and true for `ALL`, even for a NULL subject. Otherwise NULL comparisons propagate unless a match decides `ANY` or a nonmatch decides `ALL`.
+
+The public `WalkOptions` structure stays focused on traversal settings. Pruning is an internal scan policy. `Entry::relative_path()` exposes the original source-relative path without reconstructing it on every access. `SELECT *` appends `relative_path` after the existing columns to preserve their positions.
+
+For a single `files` source, mandatory `NOT (relative_path GLOB ...)` and `NOT (relative_path GLOB ANY (...))` filters can prune traversal. The optimizer recognizes provable subtree patterns ending in `{,/**}` or `/**` and leaves ambiguous wildcard or escape cases to ordinary row filtering. The directory row itself is still evaluated normally. Other patterns, filename filters, and exclusions inside `OR` do not trigger pruning. This is a conservative SQL optimization; it does not read Git's index or ignore files.
 
 Columns are read lazily, so a query touching only `path` and `kind` never calls `statx`.
 

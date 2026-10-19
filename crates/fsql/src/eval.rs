@@ -1,10 +1,13 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use globset::{GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
+use globset::{GlobMatcher, GlobSet};
+
+use crate::expr::{constant_globs, unnest};
+use crate::pattern::{compile_glob, compile_globs};
 use regex::bytes::Regex;
 use std::rc::Rc;
 
@@ -42,7 +45,7 @@ pub type SubqueryRunner = dyn Fn(&Query, Option<&dyn Row>) -> Result<ResultSet>;
 pub struct Evaluator {
     now: Nanos,
     globs: HashMap<String, GlobMatcher>,
-    glob_sets: HashMap<Vec<String>, GlobSet>,
+    glob_sets: BTreeMap<Vec<Expr>, Option<GlobSet>>,
     regexes: HashMap<String, Regex>,
     pub aggregates: HashMap<String, Value>,
     pub subqueries: Option<Rc<SubqueryRunner>>,
@@ -60,7 +63,7 @@ impl Evaluator {
         Self {
             now,
             globs: HashMap::new(),
-            glob_sets: HashMap::new(),
+            glob_sets: BTreeMap::new(),
             regexes: HashMap::new(),
             aggregates: HashMap::new(),
             subqueries: None,
@@ -271,23 +274,36 @@ impl Evaluator {
         let right = unnest(right);
         if any
             && *op == BinaryOperator::Glob
-            && let Some(patterns) = constant_globs(right)
+            && let Expr::Array(array) = right
         {
-            if patterns.is_empty() {
+            if array.elem.is_empty() {
                 return Ok(Value::Bool(false));
             }
-            if subject.is_null() {
+            if subject.is_null()
+                && array
+                    .elem
+                    .iter()
+                    .all(|expr| crate::expr::string_literal(expr).is_some())
+            {
                 return Ok(Value::Null);
             }
-            let bytes = text_bytes(&subject)
-                .ok_or_else(|| Error::Plan("GLOB subject must be text or bytes".into()))?;
-            if !self.glob_sets.contains_key(&patterns) {
-                let set = compile_globs(&patterns)?;
-                self.glob_sets.insert(patterns.clone(), set);
+            let key = array.elem.as_slice();
+            // Structural keys survive cloned expressions without allocating a
+            // vector of pattern strings or hashing every AST field on each row.
+            // Dynamic arrays are cached as such, but still evaluated per row.
+            if !self.glob_sets.contains_key(key) {
+                let compiled = constant_globs(right)
+                    .map(|patterns| compile_globs(patterns.iter().map(String::as_str)))
+                    .transpose()?;
+                self.glob_sets.insert(array.elem.clone(), compiled);
             }
-            return Ok(Value::Bool(
-                self.glob_sets[&patterns].is_match(Path::new(OsStr::from_bytes(&bytes))),
-            ));
+            if let Some(set) = &self.glob_sets[key] {
+                let bytes = text_bytes(&subject)
+                    .ok_or_else(|| Error::Plan("GLOB subject must be text or bytes".into()))?;
+                return Ok(Value::Bool(
+                    set.is_match(Path::new(OsStr::from_bytes(&bytes))),
+                ));
+            }
         }
         let candidates: Vec<Value> = match right {
             Expr::Array(array) => array
@@ -498,13 +514,7 @@ impl Evaluator {
             if self.globs.len() >= 64 {
                 self.globs.clear();
             }
-            let glob = GlobBuilder::new(pattern_text)
-                .literal_separator(false)
-                .build()
-                .map_err(|e| Error::InvalidPattern {
-                    pattern: pattern_text.clone(),
-                    reason: e.kind().to_string(),
-                })?;
+            let glob = compile_glob(pattern_text)?;
             self.globs
                 .insert(pattern_text.clone(), glob.compile_matcher());
         }
@@ -1316,49 +1326,6 @@ fn extract(field: &str, subject: Value) -> Result<Value> {
     Ok(Value::Int(value))
 }
 
-/// Remove parentheses without changing expression semantics.
-pub(crate) fn unnest(mut expr: &Expr) -> &Expr {
-    while let Expr::Nested(inner) = expr {
-        expr = inner;
-    }
-    expr
-}
-
-pub(crate) fn constant_globs(expr: &Expr) -> Option<Vec<String>> {
-    let Expr::Array(array) = unnest(expr) else {
-        return None;
-    };
-    array
-        .elem
-        .iter()
-        .map(|expr| match unnest(expr) {
-            Expr::Value(value) => match &value.value {
-                Literal::SingleQuotedString(s) | Literal::DoubleQuotedString(s) => Some(s.clone()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
-}
-
-pub(crate) fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(
-            GlobBuilder::new(pattern)
-                .literal_separator(false)
-                .build()
-                .map_err(|error| Error::InvalidPattern {
-                    pattern: pattern.clone(),
-                    reason: error.to_string(),
-                })?,
-        );
-    }
-    builder
-        .build()
-        .map_err(|error| Error::Plan(format!("glob set: {error}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1418,6 +1385,13 @@ mod tests {
             ("name GLOB ANY (ARRAY[])", Some(false)),
             ("NULL GLOB ANY (ARRAY[])", Some(false)),
             ("NULL GLOB ANY (ARRAY['*'])", None),
+            ("NULL GLOB ANY (ARRAY['['])", None),
+            ("name GLOB SOME (ARRAY['*.tmp'])", Some(true)),
+            ("name GLOB ALL (ARRAY['x.*', '*.tmp'])", Some(true)),
+            ("name GLOB ALL (ARRAY['*.rs', '*.tmp'])", Some(false)),
+            ("name GLOB ALL (ARRAY[NULL, '*.tmp'])", None),
+            ("name GLOB ALL (ARRAY[NULL, '*.rs'])", Some(false)),
+            ("NULL GLOB ALL (ARRAY[])", Some(true)),
             ("name GLOB ANY (ARRAY[NULL, '*.tmp'])", Some(true)),
             ("name GLOB ANY (ARRAY[NULL, '*.rs'])", None),
             ("name GLOB ANY (ARRAY[name])", Some(true)),
@@ -1438,10 +1412,29 @@ mod tests {
             .unwrap();
         let mut evaluator = Evaluator::default();
         for _ in 0..3 {
-            assert_eq!(evaluator.eval(&expr, &row()).unwrap(), Value::Bool(true));
+            assert_eq!(
+                evaluator.eval(&expr.clone(), &row()).unwrap(),
+                Value::Bool(true)
+            );
         }
         assert_eq!(evaluator.glob_sets.len(), 1);
         assert!(evaluator.globs.is_empty());
+    }
+
+    #[test]
+    fn dynamic_glob_arrays_do_not_cache_row_values() {
+        let expr = Parser::new(&FsqlDialect)
+            .try_with_sql("'x.tmp' GLOB ANY (ARRAY[name])")
+            .unwrap()
+            .parse_expr()
+            .unwrap();
+        let mut evaluator = Evaluator::default();
+        assert_eq!(evaluator.eval(&expr, &row()).unwrap(), Value::Bool(true));
+        let mut other = row();
+        other.0.insert("name".into(), Value::Text("*.rs".into()));
+        assert_eq!(evaluator.eval(&expr, &other).unwrap(), Value::Bool(false));
+        assert_eq!(evaluator.glob_sets.len(), 1);
+        assert!(evaluator.glob_sets.values().all(Option::is_none));
     }
 
     #[test]

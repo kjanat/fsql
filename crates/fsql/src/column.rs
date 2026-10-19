@@ -103,7 +103,6 @@ pub const ACL_COLUMNS: [&str; 5] = ["path", "kind", "tag", "qualifier", "perms"]
 impl Column {
     pub const ALL: [Self; 28] = [
         Self::Path,
-        Self::RelativePath,
         Self::Name,
         Self::Parent,
         Self::Ext,
@@ -130,6 +129,7 @@ impl Column {
         Self::Btime,
         Self::Target,
         Self::Broken,
+        Self::RelativePath,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
