@@ -1,2 +1,7 @@
-runner-run 0.27.1
-tombi      1.7.3
+github:kjanat/runner                    0.28
+github:kjanat/shellcheck-rs             latest
+github:tombi-toml/tombi                 1.8
+go:actionlint.kjanat.dev/cmd/actionlint fuck-it
+ruff                                    0.17
+ty                                      0.0
+uv                                      0.13

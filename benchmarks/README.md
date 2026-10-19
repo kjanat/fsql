@@ -1,0 +1,124 @@
+# Filesystem benchmarks
+
+There are two complementary suites:
+
+- `uv run bench` measures complete CLI invocations, including startup and output generation, against equivalent filesystem tools.
+- `cargo bench:engine` measures the Rust library with Criterion, excluding process startup, SQL preparation, fixture setup, and output formatting from execution timings. The existing `prepare` group measures preparation separately.
+
+Build the CLI before running the command suite:
+
+```sh
+cargo build --release --package fsql-cli --locked
+uv run bench
+```
+
+The default creates a disposable deterministic tree with hidden files, ignored directories, sparse files, symlinks, and filenames containing spaces, quotes, and Unicode. It compares `fsql`, GNU `find`, `fd`, and GNU `ls` where their semantics overlap. Missing optional tools and unsupported cases are reported as skips. The harness uses only Python’s standard library. `uv run bench` uses the project’s pinned Python; direct execution with `python3 benchmarks/run.py` also works with Python 3.11 or newer. Runner users can use `run bench:cli` and `run bench:check`.
+
+## Real trees and binaries
+
+```sh
+uv run bench --root /path/to/project --runs 10 --output /tmp/project-bench.json
+
+# Compare two existing binaries; the harness never checks out, builds, or installs them.
+uv run bench \
+  --fsql current=./target/release/fsql \
+  --fsql-legacy before=/path/to/pre-pr8/fsql \
+  --root /path/to/project --output /tmp/before-after.json
+
+# Disable external tools, select cases, or control fd's parallelism.
+uv run bench --tools --case paths --case exclude
+uv run bench --tools find fd --fd-threads 1
+
+# Optional, already-built gahag/FSQL executable.
+uv run bench --gahag /path/to/gahag/fsql
+```
+
+`--fsql LABEL=PATH` can be repeated for versions that support the current dialect. `--fsql-legacy` uses a regular expression instead of `relative_path GLOB ANY` for the exclusion case, so pre-PR8 binaries can participate. This compares equivalent results using the capabilities available in each version; it is not an identical-query microbenchmark. Use `--query` for identical SQL across binaries.
+
+The existing root is only read. Put the report outside the measured tree. Default reports go to `target/benchmarks/latest.json`; the harness rejects that destination if `--root` contains it. The generated fixture is removed after the run. Reports include raw samples, medians/ranges, exact argument arrays and stdin, output codecs, binary SHA-256 hashes, harness hash, platform, thread settings, seed, and skipped cases. Use concrete executables rather than version-manager shims or wrapper scripts, whose hashes identify the launcher rather than its eventual target. Label binaries with meaningful revisions; a hash identifies the executable independently of a checkout's current revision.
+
+## Shared semantics
+
+| Case      | Contract                                                                                     | Tools                     |
+| --------- | -------------------------------------------------------------------------------------------- | ------------------------- |
+| `paths`   | Every descendant entry, excluding the root                                                   | fsql, find, fd, gahag     |
+| `shallow` | Immediate children only                                                                      | fsql, find, fd, ls, gahag |
+| `size`    | Regular files strictly larger than `--size` bytes, default 1,000,000                         | fsql, find, fd            |
+| `suffix`  | Entry paths ending in case-sensitive `.rs`                                                   | fsql, find, fd, gahag     |
+| `exclude` | Every descendant except entries with `.git`, `target`, or `node_modules` as a path component | fsql, find, fd, gahag     |
+
+Commands use `LC_ALL=C.UTF-8`. Hidden and ignored entries are included. Symlinks are listed but never followed. The size case excludes symlinks and directories, because the tools do not all expose identical size predicates for those entry types. `fd` gets `--hidden --no-ignore --case-sensitive`; it retains its normal thread count unless overridden. Shallow scans use explicit depth limits in fsql, find, and fd. `ls` is used only for unsorted shallow listing, without parsing recursive headings or inventing filtering it cannot perform.
+
+The exclusion adapter uses separate directory and descendant glob patterns. Do not substitute `{,/**}` without checking results: current empty-alternative glob behavior can retain the directory itself. `find` and `fd` can prune excluded trees too.
+
+Every supported command must match an independent Python `scandir`/`lstat` oracle before **and after** timing. Comparison preserves duplicate counts and ignores order. Newlines, tabs, quotes, and Unicode are preserved through JSON output for fsql and NUL output for find/fd/ls. gahag's REPL framing is decoded separately; that adapter is skipped if filenames contain CR or LF. Non-UTF-8 filenames and `.fsql-*` staging names are explicitly rejected rather than silently normalized into a false comparison.
+
+Each subprocess must exit successfully with empty stderr, including timed runs. Timeouts, wrong rows, duplicates, unexpected diagnostics, changed input metadata, or a changed executable fail the run without publishing a new success report. This detects many concurrent changes but is not an atomic filesystem snapshot; use a quiet tree. Reads may update access times, which are intentionally excluded from stability checks.
+
+One warmup and seven measured runs are the defaults. Command order is shuffled each round with a recorded deterministic seed. Timing includes process startup and serialization to `/dev/null`; correctness decoding is outside timing. These are **CLI workload comparisons**, so JSON serialization versus NUL output is part of their cost. These are warm-cache runs: the oracle itself visits the tree, no caches are flushed, and no cold-disk claims are made. Avoid concurrent compilation, indexing, or unrelated workloads when collecting publishable timings.
+
+## Extend the command suite
+
+Additional tools can participate through a trusted TOML adapter without changing the harness. See [`adapters/find-regex.toml`](adapters/find-regex.toml):
+
+```sh
+uv run bench --adapter benchmarks/adapters/find-regex.toml --case suffix
+```
+
+An adapter has a unique `name` and `[cases.CASE]` sections containing an `argv` array and a `codec` (`nul` or `json`). Executables are resolved before changing directory; commands run with the input tree as their working directory. Argument substitutions are `{{root}}`, `{{size}}`, and `{{size_plus_one}}`. Arguments are passed directly, without a shell. NUL output may contain relative or root-contained absolute paths; JSON must contain one text field named `path` with an absolute path. Custom adapters are executable code: only run ones you trust. They must be read-only. They undergo the same independent result checks as built-in tools.
+
+Adding a genuinely different workload requires a new case contract, oracle predicate, adapters that can satisfy it, and a contract test. Unsupported tools should skip the case rather than quietly measure different work.
+
+## SQL workloads and making `hell` faster
+
+The original policy/recursive workload is now checked in as a root-parameterized query. It remains a fixed illustrative policy, not an implementation of Git ignore/index semantics. Compare four equivalent versions:
+
+```sh
+uv run bench --root /path/to/project \
+  --query hell=benchmarks/queries/hell.fsql \
+  --query pruned=benchmarks/queries/hell-pruned.fsql \
+  --query joined=benchmarks/queries/hell-joined.fsql \
+  --query indexed=benchmarks/queries/hell-indexed.fsql \
+  --ordered --output /tmp/hell.json
+```
+
+With no `--root`, the same command uses the generated fixture. `--query` replaces the built-in cases and external-tool comparisons. Templates use `{{root}}` as a complete SQL string literal; do not add quotes. Each query must return one absolute text column named `path`. The first query/binary supplies the expected result, so this mode proves equivalence, not correctness against an independent policy interpreter. `--ordered` additionally verifies identical output order. Use the original template on both old and new binaries to compare the exact same query.
+
+The variants isolate three improvements:
+
+1. **Scan pruning:** project the native `relative_path` and move mandatory exclusions into the inventory's `files(...)` query. The original materializes the full inventory and only then filters the next CTE.
+2. **Indexed final join:** rename the subtree grouping key to `parent` so the final left join can use `USING (parent)`. The executor currently indexes `USING` joins; equivalent `ON a.key = b.key` joins use nested loops.
+3. **Indexed rule lookup:** replace the correlated higher-priority lookup with a `USING (path, policy_group)` join to grouped maxima, preserving deny-on-tie behavior. The `joined` variant retains the correlated lookup so its cost can be measured separately.
+
+These are SQL rewrites, not engine changes. The original remains a regression baseline. Future engine work can target predicate pushdown across safe CTE boundaries, indexing equality conditions in `ON`, and decorrelating eligible `EXISTS` predicates. Preserve NULL behavior, duplicate multiplicity, outer joins, rule precedence, and output ordering when doing so. The rule-pattern join still needs pattern evaluation, and recursive ancestry/grouping still has a cost even after these rewrites.
+
+## Rust benchmarks
+
+```sh
+cargo bench:engine --test                       # run every correctness assertion once
+cargo bench:engine policy                       # original / pruned / joined / indexed hell
+cargo bench:engine pruning                      # identical results, with/without traversal pruning
+cargo bench:engine relational                   # ON nested loop versus USING index
+cargo bench:engine glob_sets                    # scalar OR versus constant GLOB ANY
+cargo bench:engine --save-baseline before
+cargo bench:engine --baseline before
+```
+
+The new groups extend the existing preparation, scan, metadata, top-k, aggregation, streaming, and journaled mutation benchmarks:
+
+- `policy`: shared SQL templates with 100/1,000 ordinary files, four times as many excluded build artifacts, and explicit allow/deny cases. Values and ordering must match across all variants.
+- `pruning`: the same filesystem fixture and predicate, with `IS TRUE` preventing optimizer extraction in the row-filter baseline. Result sets must match.
+- `relational`: 100/1,000 in-memory `VALUES` rows on each side, isolating equality-join execution without filesystem or output costs.
+- `glob_sets`: 100/1,000 in-memory paths, comparing scalar glob disjunctions and constant quantified glob sets.
+
+Criterion includes repeated execution and its per-execution caches; queries are prepared outside the timed iteration. Fixture creation and correctness checks are also outside timings. Reports live under `target/criterion`. `TMPDIR` controls the filesystem used for generated fixtures. Do not interpret tmpfs timings as disk durability costs.
+
+## Validation
+
+```sh
+python3 -m unittest discover -s benchmarks -p 'test_*.py'
+uv run bench --files 100 --warmups 0 --runs 1
+cargo bench:engine --test
+```
+
+CI runs these correctness checks without performance thresholds. The Python integration tests cover real adapters, exact size boundaries, symlinks, special filenames, duplicate detection, stderr failures, and same-size input changes. Optional external tools are tested when installed. Timings from shared CI runners are not performance acceptance criteria.

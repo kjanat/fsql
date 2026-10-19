@@ -12,6 +12,8 @@
 		"./packages/*"
 	],
 	"scripts": {
+		"bench:check": "python3 -m unittest discover -s benchmarks -p 'test_*.py'",
+		"bench:cli": "python3 benchmarks/run.py",
 		"grammar:check": "run @kjanat/tree-sitter-fsql:check",
 		"grammar:generate": "run @kjanat/tree-sitter-fsql:generate",
 		"grammar:test": "run @kjanat/tree-sitter-fsql:test",

@@ -5,33 +5,89 @@ on:
   push: { branches: [master] }
 
 permissions: { contents: read }
-
-concurrency:
-  group: rust-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+defaults: { run: { shell: "bash -euo pipefail {0}" } }
 
 jobs:
   check:
-    runs-on: ubuntu-26.04
+    concurrency:
+      group: ${{ github.workflow }}-check-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: &isPR ${{ github.event_name == 'pull_request' }}
+    runs-on: &ubuntu ubuntu-26.04
     timeout-minutes: 20
     cancel-timeout-minutes: 1
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { persist-credentials: false }
       - parallel:
-          - uses: kjanat/runner@1f0e35b1e967fb26a2fd38667d3369d66e9d43b1 # master
-            with: { version-file: .tool-versions }
-          - uses: kjanat/setup-tombi@3d531337a5fa703aa634e6ae349a6b2be0f0e9bb # master
-            with: { version-file: .tool-versions }
-          - name: Install the pinned Rust toolchain
-            run: rustup show active-toolchain
-      - name: Check formatting
-        uses: kjanat/dprint-check@v3
+          - &toolchain
+            name: Install Rust toolchain
+            run: rustup toolchain install
+          - &runner
+            name: Setup runner-run
+            uses: kjanat/runner@b32ea932a1813ae0be44e755c16df9f9f5ca86a4 # master
+            with: &tv { version-file: .tool-versions }
       - name: Test
-        run: cargo test:workspace
+        run: run test:workspace
       - name: Build Zed WASM adapter
-        run: cargo build:zed
+        run: run build:zed
       - name: Clippy
-        run: cargo lint:workspace
+        run: run lint:workspace
       - name: Documentation
-        run: cargo check:doc
+        run: run check:doc
+
+  formatting:
+    concurrency:
+      group: ${{ github.workflow }}-formatting-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: *isPR
+    runs-on: *ubuntu
+    timeout-minutes: 3
+    cancel-timeout-minutes: 1
+    steps:
+      - *checkout
+      - parallel:
+          - *runner
+          - uses: kjanat/setup-tombi@fa7a237e9661f88c78309b5214f4eb7cf0c7c5f6 # master
+            with: *tv
+          - name: Install rustfmt
+            run: rustup component add rustfmt
+      - name: Check formatting
+        uses: kjanat/dprint-check@29c42153a7346f4d7315883ff7722cfe22cd510c # v3
+
+  bench:
+    if: &notCancelled ${{ !cancelled() }}
+    needs: [check]
+    concurrency:
+      group: ${{ github.workflow }}-bench-${{ github.ref }}
+      queue: max
+      cancel-in-progress: false
+    runs-on: *ubuntu
+    timeout-minutes: 20
+    cancel-timeout-minutes: 5
+    steps:
+      - parallel:
+          - *checkout
+          - name: Install fd for benchmark comparisons
+            run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends fd-find;
+              sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd; fd --version
+      - parallel:
+          - *toolchain
+          - *runner
+          - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+          - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+            with: { python-version-file: ".python-version" }
+      - name: Build benchmark CLI
+        id: build_cli
+        run: run build:cli
+      - name: Benchmark harness contracts
+        if: &builtCli ${{ !cancelled() && steps.build_cli.outcome == 'success' }}
+        run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
+      - name: CLI benchmark correctness (no performance thresholds)
+        if: *builtCli
+        run: run bench
+          --files 100
+          --warmups 0
+          --runs 1
+      - name: Rust benchmark correctness
+        if: *notCancelled
+        run: run bench:engine --test
