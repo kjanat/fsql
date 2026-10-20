@@ -102,6 +102,75 @@ class HarnessTests(unittest.TestCase):
                 ):
                     bench.decode(command, b"fsql> ", self.root)
 
+    def test_recovery_name_grammar_matches_walker(self):
+        for name in [
+            ".fsql-notes",
+            ".fsql-cache",
+            ".fsql-a-b-no",
+            ".fsql-g-1-2",
+            ".fsql--1-2",
+            ".fsql-a-b-1-extra",
+            ".fsql-a-b-١",
+        ]:
+            (self.root / name).mkdir()
+            (self.root / name / "ordinary").write_text("keep")
+        rows = bench.inventory(self.root)
+        self.assertIn(".fsql-notes/ordinary", rows)
+        self.assertIn(".fsql-cache/ordinary", rows)
+        command = bench.fsql_command(
+            "fsql",
+            str(bench.REPO / "target/release/fsql"),
+            "paths",
+            self.root,
+            100,
+            False,
+        )
+        bench.verify(command, self.root, 10, bench.expected(rows, "paths", 100))
+        for name in [".fsql-a-b-1", ".fsql-ABC-012-00"]:
+            for parent in [self.root, self.root / ".fsql-notes"]:
+                reserved = parent / name
+                reserved.mkdir()
+                try:
+                    with self.assertRaisesRegex(ValueError, "private"):
+                        bench.inventory(self.root)
+                finally:
+                    reserved.rmdir()
+
+    def test_changed_harness_preserves_previous_report(self):
+        harness = self.root / "harness.py"
+        harness.write_text("original")
+        report = self.root / "report.json"
+        report.write_text('{"previous": true}')
+        argv = [
+            "bench",
+            "--files",
+            "1",
+            "--tools",
+            "--case",
+            "paths",
+            "--runs",
+            "1",
+            "--warmups",
+            "0",
+            "--output",
+            str(report),
+        ]
+
+        def change_harness(*args, **kwargs):
+            harness.write_text("replacement")
+            return 1.0, b""
+
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(bench, "__file__", str(harness)),
+            patch.object(bench, "verify", return_value=[]),
+            patch.object(bench, "run", side_effect=change_harness),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ValueError, "harness changed"),
+        ):
+            bench.main()
+        self.assertEqual(json.loads(report.read_text()), {"previous": True})
+
     def test_complete_run_writes_verified_report(self):
         import subprocess
 
@@ -125,6 +194,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         data = json.loads(report.read_text())
         self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(data["harness_sha256"], bench.digest(bench.__file__))
         self.assertEqual(len(data["results"]), 6)
         self.assertTrue(all(len(row["samples_ms"]) == 1 for row in data["results"]))
         self.assertTrue(

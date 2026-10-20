@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import statistics
 import subprocess
@@ -98,9 +99,12 @@ def inventory(root: Path) -> dict[str, tuple[bool, int, tuple[int, ...]]]:
                         "benchmark requires UTF-8 filenames; refusing lossy comparison"
                     ) from error
                 # fsql intentionally hides its private recovery staging entries.
-                if relative.startswith(".fsql-") or "/.fsql-" in relative:
+                if any(
+                    re.fullmatch(r"\.fsql-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9]+", part)
+                    for part in path.relative_to(root).parts
+                ):
                     raise ValueError(
-                        "private .fsql-* staging names require a separate benchmark root"
+                        "private .fsql-<hex>-<hex>-<decimal> staging names require a separate benchmark root"
                     )
                 stat = entry.stat(follow_symlinks=False)
                 result[relative] = (
@@ -412,6 +416,8 @@ def digest(path: str) -> str:
 
 
 def main() -> int:
+    harness_path = str(Path(__file__).resolve())
+    harness_hash = digest(harness_path)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--root",
@@ -621,12 +627,14 @@ def main() -> int:
             raise ValueError(
                 "an executable changed during the benchmark; results discarded"
             )
+        if digest(harness_path) != harness_hash:
+            raise ValueError("harness changed during the benchmark; results discarded")
         report = {
             "schema_version": 1,
             "timestamp": datetime.now(UTC).isoformat(),
             "platform": platform.platform(),
             "cpu_count": os.cpu_count(),
-            "harness_sha256": digest(__file__),
+            "harness_sha256": harness_hash,
             "timeout_seconds": args.timeout,
             "root": str(root),
             "fixture_files": args.files if not args.root else None,
