@@ -1,0 +1,85 @@
+-- Pruned scan plus indexed final subtree join; retain correlated rule lookup.
+WITH RECURSIVE
+inventory AS (
+  SELECT path, name, parent,
+         relative_path
+  FROM files({{root}})
+  WHERE kind IN ('file', 'symlink')
+    AND NOT (relative_path GLOB '**/{.git,node_modules,target,.claude,.vscode,.vs,bower_components,out,coverage,__pycache__,venv,.venv,Pods,DerivedData,.cache,.rustup,.next,.nuxt,.svelte-kit,.turbo,.gradle,.terraform,.mypy_cache,.pytest_cache,.ruff_cache,.npm,.pnpm-store,.yarn,.wrangler,.playwright-mcp,.playwright-cli,.serena,.codex-remote-*}{,/**}')
+),
+candidates AS (
+  -- Mandatory exclusions cannot be undone by a filename-specific allow rule.
+  SELECT path, name, parent, relative_path
+  FROM inventory
+
+),
+rules(policy_group, subject, pattern, priority, allowed) AS (
+  VALUES
+    ('general', 'name', '*.{map,min.js,min.css,bundle.js,bak}', 10, false),
+    ('general', 'name', '.cache_ggshield', 10, false),
+    ('general', 'name', '.dev.vars{,.*}', 10, false),
+    ('environment', 'name', '.env{,.*}', 10, false),
+    ('environment', 'name', '.env.example', 20, true),
+    ('general', 'path', '{.rpt2_cache,build,dist,scripts/build-website,deployment/npm/dist,website/playground/dist,website/playground/build,website/playground/.pnp,website/src/_includes/css/bulma}{,/**}', 10, false),
+    ('general', 'path', '{dprint.log,update-log.txt,.zed/log.log,crates/test-plugin/Cargo.lock,website/src/assets/schemas/v0.json}', 10, false),
+    ('general', 'path', '**/.opencode/{package-lock.json,state/**}', 10, false),
+    ('general', 'path', 'crates/dprint/**/temp{,/**}', 10, false),
+    ('general', 'path', 'crates/{dprint,dprint-core}/**/*.rs.bk', 10, false),
+    ('general', 'path', 'crates/dprint-core/**/Cargo.lock', 10, false),
+    ('general', 'path', 'website/**/_site{,/**}', 10, false),
+    ('general', 'path', 'website/playground/**/{.pnp.js,.DS_Store,npm-debug.log*,yarn-debug.log*,yarn-error.log*}', 10, false)
+),
+rule_matches AS (
+  SELECT c.path, r.policy_group, r.priority, r.allowed
+  FROM candidates c
+  JOIN rules r ON
+       (r.subject = 'name' AND c.name GLOB r.pattern)
+    OR (r.subject = 'path' AND c.relative_path GLOB r.pattern)
+),
+winning_priorities AS (
+  SELECT path, policy_group, max(priority) AS priority
+  FROM rule_matches
+  GROUP BY path, policy_group
+),
+blocked AS (
+  -- Higher-priority rules win within their group; deny wins equal priorities.
+  -- An environment allow never cancels an unrelated general exclusion.
+  SELECT DISTINCT m.path
+  FROM rule_matches m
+  WHERE m.allowed = false
+    AND NOT EXISTS (
+      SELECT 1
+      FROM winning_priorities w
+      WHERE w.path = m.path
+        AND w.policy_group = m.policy_group
+        AND w.priority > m.priority
+    )
+),
+selected_paths AS (
+  SELECT path FROM candidates
+  EXCEPT
+  SELECT path FROM blocked
+),
+selected_files AS (
+  SELECT path, dirname(path) AS parent
+  FROM selected_paths
+),
+ancestry(path, directory) AS (
+  -- Each selected file contributes once to each containing directory.
+  SELECT path, parent FROM selected_files
+  UNION ALL
+  SELECT path, dirname(directory)
+  FROM ancestry
+  WHERE directory <> {{root}}
+    AND directory <> dirname(directory)
+),
+busy_subtrees AS (
+  SELECT directory AS parent, count(*) AS file_count
+  FROM ancestry
+  GROUP BY directory
+  HAVING count(*) > 1
+)
+SELECT f.path
+FROM selected_files f
+LEFT JOIN busy_subtrees s USING (parent)
+ORDER BY coalesce(s.file_count, 1) DESC, f.parent, f.path;

@@ -10,6 +10,18 @@ license.workspace    = true
 harness = false
 name    = "engine"
 
+[[bench]]
+harness = false
+name    = "traversal"
+
+[[bench]]
+harness = false
+name    = "layers"
+
+[[bench]]
+harness = false
+name    = "layers_alloc"
+
 [dependencies]
 sqlparser.workspace   = true
 tree-fucker.workspace = true
@@ -22,8 +34,12 @@ serde_json.workspace = true
 uzers.workspace      = true
 
 [dev-dependencies]
-criterion.workspace = true
-tempfile.workspace  = true
+criterion.workspace   = true
+ignore.workspace      = true
+jwalk.workspace       = true
+stats_alloc.workspace = true
+tempfile.workspace    = true
+walkdir.workspace     = true
 
 [lints]
 workspace = true

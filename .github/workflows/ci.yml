@@ -5,33 +5,87 @@ on:
   push: { branches: [master] }
 
 permissions: { contents: read }
-
-concurrency:
-  group: rust-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+defaults: { run: { shell: "bash -euo pipefail {0}" } }
 
 jobs:
   check:
-    runs-on: ubuntu-26.04
+    concurrency:
+      group: ${{ github.workflow }}-check-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: &isPR ${{ github.event_name == 'pull_request' }}
+    runs-on: &ubuntu ubuntu-26.04
     timeout-minutes: 20
     cancel-timeout-minutes: 1
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { persist-credentials: false }
       - parallel:
-          - uses: kjanat/runner@1f0e35b1e967fb26a2fd38667d3369d66e9d43b1 # master
-            with: { version-file: .tool-versions }
-          - uses: kjanat/setup-tombi@3d531337a5fa703aa634e6ae349a6b2be0f0e9bb # master
-            with: { version-file: .tool-versions }
-          - name: Install the pinned Rust toolchain
-            run: rustup show active-toolchain
-      - name: Check formatting
-        uses: kjanat/dprint-check@v3
+          - &toolchain
+            name: Install Rust toolchain
+            run: rustup toolchain install
+          - &mise
+            name: Install tools from .tool-versions
+            uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
+            with: { install: true }
       - name: Test
-        run: cargo test:workspace
+        run: run test:workspace
       - name: Build Zed WASM adapter
-        run: cargo build:zed
+        run: run build:zed
       - name: Clippy
-        run: cargo lint:workspace
+        run: run lint:workspace
       - name: Documentation
-        run: cargo check:doc
+        run: run check:doc
+
+  formatting:
+    concurrency:
+      group: ${{ github.workflow }}-formatting-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: *isPR
+    runs-on: *ubuntu
+    timeout-minutes: 3
+    cancel-timeout-minutes: 1
+    steps:
+      - *checkout
+      - parallel: [*toolchain, *mise]
+      - name: Check formatting
+        uses: kjanat/dprint-check@29c42153a7346f4d7315883ff7722cfe22cd510c # v3
+
+  bench:
+    if: &notCancelled ${{ !cancelled() }}
+    needs: [check]
+    concurrency:
+      group: ${{ github.workflow }}-bench-${{ github.ref }}
+      queue: max
+      cancel-in-progress: false
+    runs-on: *ubuntu
+    timeout-minutes: 20
+    cancel-timeout-minutes: 5
+    steps:
+      - *checkout
+      - parallel: [*toolchain, *mise]
+      - name: Verify benchmark tools
+        run: |
+          # shellcheck disable=SC2312
+          column -t <(fd --version | head -1 ; bfs -version | head -1 ; fselect --version | head -1) | sort
+      - name: Build benchmark CLI
+        id: build_cli
+        run: run build:cli
+      - name: Benchmark harness contracts
+        if: &builtCli ${{ !cancelled() && steps.build_cli.outcome == 'success' }}
+        run: uv run python -m unittest discover -s benchmarks -p 'test_*.py'
+      - name: CLI benchmark correctness (no performance thresholds)
+        if: *builtCli
+        run: run bench
+          --files 100
+          --warmups 0
+          --runs 1
+      - name: Rust benchmark correctness
+        if: *notCancelled
+        run: run bench:engine --test
+      - name: Rust traversal benchmark correctness
+        if: *notCancelled
+        run: run bench:traversal --test
+      - name: Layer probe correctness
+        if: *notCancelled
+        run: |
+          cargo bench:layers --test
+          cargo bench:alloc --test

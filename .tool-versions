@@ -1,2 +1,13 @@
-runner-run 0.27.1
-tombi      1.7.3
+bun                                     1.4
+github:astral-sh/ruff                   latest
+github:astral-sh/ty                     latest
+github:astral-sh/uv                     latest
+github:jhspetersson/fselect             latest
+github:kjanat/dprint                    latest
+github:kjanat/runner                    0.28
+github:kjanat/shellcheck-rs             latest
+github:sharkdp/fd                       latest
+github:tombi-toml/tombi                 1.8
+go                                      1.27
+go:actionlint.kjanat.dev/cmd/actionlint fuck-it
+vfox:jdx/vfox-bfs                       latest

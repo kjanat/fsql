@@ -1,23 +1,29 @@
 #:schema https://raw.githubusercontent.com/kjanat/cargo-config-schema/refs/heads/master/cargo-config.json
 
 [alias]
-rr = ["run", "--release"]
+"bench:alloc"  = "bench --package fsql --bench layers_alloc --locked --"
+"bench:layers" = "bench --package fsql --bench layers --locked --"
+rr             = ["run", "--release"]
 
-"build:zed"      = ["build", "--package", "fsql-zed", "--target", "wasm32-wasip2", "--locked"]
-"check:doc"      = ["doc", "--workspace", "--no-deps", "--locked"]
-"check:fmt"      = ["fmt", "--all", "--check"]
-"lint:workspace" = ["clippy", "--workspace", "--all-targets", "--locked"]
-"test:workspace" = ["test", "--workspace", "--locked"]
+"build:cli"        = ["build", "--release", "--package", "fsql-cli"]
+"build:cli:locked" = ["build:cli", "--locked"]
+"build:zed"        = ["build", "--package", "fsql-zed", "--target", "wasm32-wasip2"]
+"build:zed:locked" = ["build:zed", "--locked"]
+"check:doc"        = ["doc", "--workspace", "--no-deps", "--locked"]
+"check:fmt"        = ["fmt", "--all", "--check"]
+"lint:workspace"   = ["clippy", "--workspace", "--all-targets", "--locked"]
+"test:workspace"   = ["test", "--workspace", "--locked"]
 
 fsql         = ["rr", "--bin", "fsql", "--package", "fsql-cli", "--"]
 fsql-install = ["install", "--path=crates/fsql-cli", "--bin=fsql"]
 
-"bench:engine"   = ["bench", "--package", "fsql", "--bench", "engine", "--locked", "--"]
-"example:query"  = ["run", "--package", "fsql", "--example", "query", "--locked", "--"]
-"example:stream" = ["run", "--package", "fsql", "--example", "stream", "--locked", "--"]
-"example:undo"   = ["run", "--package", "fsql", "--example", "mutate_and_undo", "--locked", "--"]
-"sandbox:fsql"   = ["run", "--config", ".cargo/sandbox.toml", "--package", "fsql-cli", "--locked", "--"]
-"sandbox:test"   = ["test", "--config", ".cargo/sandbox.toml", "--package", "fsql", "--test", "contracts", "--locked"]
+"bench:engine"    = ["bench", "--package", "fsql", "--bench", "engine", "--locked", "--"]
+"bench:traversal" = ["bench", "--package", "fsql", "--bench", "traversal", "--locked", "--"]
+"example:query"   = ["run", "--package", "fsql", "--example", "query", "--locked", "--"]
+"example:stream"  = ["run", "--package", "fsql", "--example", "stream", "--locked", "--"]
+"example:undo"    = ["run", "--package", "fsql", "--example", "mutate_and_undo", "--locked", "--"]
+"sandbox:fsql"    = ["run", "--config", ".cargo/sandbox.toml", "--package", "fsql-cli", "--locked", "--"]
+"sandbox:test"    = ["test", "--config", ".cargo/sandbox.toml", "--package", "fsql", "--test", "contracts", "--locked"]
 
 [env]
 RUSTFLAGS = { value = "-Znightly -D warnings", force = true }

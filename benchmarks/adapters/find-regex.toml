@@ -1,0 +1,7 @@
+# Optional alternative implementation of the suffix case. Commands run at --root.
+# Load with: python3 benchmarks/run.py --adapter benchmarks/adapters/find-regex.toml
+name = "find-regex"
+
+[cases.suffix]
+argv  = ["find", "-P", ".", "-regextype", "posix-extended", "-mindepth", "1", "-regex", ".*[.]rs$", "-print0"]
+codec = "nul"

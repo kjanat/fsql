@@ -291,6 +291,8 @@ cargo build --release
 cargo test --workspace
 ```
 
+For repeatable CLI comparisons against `find`, `fd`, and `ls`, plus Criterion engine benchmarks and version/query comparisons, see the [benchmark guide](benchmarks/README.md). Development commands are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 [`vendor/sqlparser`] is a patched copy of [`sqlparser-rs`]; see `vendor/README.md`. [`tree-fucker`] is a git dependency on `github.com/kjanat/tree-fucker`, pinned in `Cargo.lock`. Its one-shot `Scan` performs the `files` traversal. It lists each directory directly, never follows a symbolic link, and applies the mount-crossing policy at every domain boundary, so `-x` stays on the root's filesystem while a plain walk crosses into mounts beneath the root. Rows stream as each directory's listing completes. Traversal operations run under tree-fucker's process-wide resource governor, which the CLI allows one full worker of foreground time. fsql reads metadata lazily with its own `statx` and `readlinkat` calls. These follow-up reads use the listed directory's descriptor while an anchor is available, and an absolute path after the bounded anchor allowance is exhausted. They are separate from the traversal governor. The same library backs the `mounts` probe. Query cancellation also cancels active scans; resource-limit and quarantine events remain fatal even in best-effort mode.
 
 [`vendor/sqlparser`]: ./vendor/sqlparser/

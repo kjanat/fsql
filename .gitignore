@@ -1,4 +1,6 @@
+.venv/
 /*.fsql
 /datafusion*
 /node_modules/
 /target
+__pycache__/

@@ -1,0 +1,57 @@
+#:schema https://dprint.kjanat.dev/schemas/v0.json
+
+extends  = "https://cdn.jsdelivr.net/gh/kjanat/kjanat/configs/dprint.remote.json"
+excludes = [
+  "**/target",
+  "**/node_modules",
+  "**/{*-,bun}lock(.*)?",
+  "vendor/*/**",
+  "**/flamegraph.svg",
+  "tree-sitter-fsql/grammar/**",
+  "tree-sitter-fsql/src/**",
+  "tree-sitter-fsql/test/corpus/**"
+]
+plugins  = ["npm:@dprint/exec@0.7.3/plugin.json@704701df449dd7e942a71144773778ac529d68c2e4657bfc236d393b898b9a67"]
+
+[[exec.commands]]
+command = "rustfmt"
+exts    = ["rs"]
+
+[[exec.commands]]
+command = "tombi format - --stdin-filename {{file_path}}"
+exts    = ["toml"]
+
+[markdown]
+textWrap = "never"
+
+[typescript]
+"module.sortImportDeclarations"         = "maintain"
+"module.sortExportDeclarations"         = "maintain"
+"exportDeclaration.sortNamedExports"    = "maintain"
+"exportDeclaration.sortTypeOnlyExports" = "none"
+"importDeclaration.sortNamedImports"    = "maintain"
+"importDeclaration.sortTypeOnlyImports" = "none"
+
+# TODO: follow-up on this crash at 445826ebabf469e54d00652aa789a7e5bc447cc5
+# on: kjanat/svg, kjanat/dprint-plugin-svg
+# ❯ dprint fmt
+# Critical error formatting /home/kjanat/projects/fsql/vendor/sqlparser/sqlparser_bench/img/flamegraph.svg. Cannot continue. Message: Originally panicked in dprint-plugin-svg, then failed reinitialize. This may be a bug in the plugin, the dprint cli is out of date, or the plugin is out of date.
+# Original error: error while executing at wasm backtrace:
+#     0:  0x71b1c - <unknown>!<wasm function 903>
+#     1:  0x758f7 - <unknown>!<wasm function 942>
+#     2:  0x13c56 - <unknown>!<wasm function 495>
+#     3:  0x13d20 - <unknown>!<wasm function 497>
+#     4:  0x19596 - <unknown>!<wasm function 627>
+#     5:   0x6f6d - <unknown>!<wasm function 175>
+#     6:   0xf5b2 - <unknown>!<wasm function 363>
+#     7:  0x11f84 - <unknown>!<wasm function 450>
+# Reinitialize error: error while executing at wasm backtrace:
+#     0:  0x71b1c - <unknown>!<wasm function 903>
+#     1:  0x758f7 - <unknown>!<wasm function 942>
+#     2:  0x13c56 - <unknown>!<wasm function 495>
+#     3:  0x13d20 - <unknown>!<wasm function 497>
+#     4:  0x19596 - <unknown>!<wasm function 627>
+#     5:   0x6f6d - <unknown>!<wasm function 175>
+#     6:   0xf5b2 - <unknown>!<wasm function 363>
+#     7:  0x11f84 - <unknown>!<wasm function 450>
+# gdHad 1 error formatting.

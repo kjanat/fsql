@@ -31,13 +31,29 @@ Fixtures use ten subdirectories, alternating `.rs`/`.txt` extensions, and determ
 
 Temporary fixtures live under `TMPDIR` (or the system temporary directory). Set `TMPDIR` to an existing directory on the filesystem you want to measure: journal durability costs on tmpfs are not representative of disk storage. These are warm-cache microbenchmarks; they do not flush the OS cache. Throughput counts fixture files, excluding their directories. Criterion writes reports below the Cargo target directory's `criterion` folder. Compare runs on the same machine, filesystem, and build configuration.
 
+## CLI comparisons and policy workloads
+
+The [filesystem benchmark harness](benchmarks/README.md) compares complete commands with `find`, `fd`, `ls`, optional gahag/FSQL, and additional TOML adapters. It verifies equivalent results before and after timing, records executable hashes and raw samples, and supports multiple fsql versions or SQL variants on generated fixtures or existing trees.
+
+```sh
+cargo build:cli:locked
+uv run bench
+cargo bench:engine policy
+cargo bench:engine pruning
+cargo bench:engine relational
+cargo bench:engine glob_sets
+```
+
+The Rust suite also embeds the original, scan-pruned, and indexed-join versions of the `hell` query from [`benchmarks/queries`]. See the harness documentation for comparison contracts, query templates, reproducibility limits, and baseline commands.
+
+[`benchmarks/queries`]: benchmarks/queries/
+
 ## Disposable filesystem runs (Linux)
 
 Install Bubblewrap (`bwrap`) and use the opt-in Cargo configuration from the workspace root:
 
 ```sh
 cargo sandbox:fsql --apply -F "${PWD}/examples/sandbox-mutations.fsql"
-
 cargo sandbox:test
 ```
 
@@ -46,8 +62,8 @@ Cargo builds normally on the host. Each executable it launches through the runne
 To start with existing files, set `FSQL_SANDBOX_SEED` to a directory. Its contents are copied into the writable tree, preserving symlinks; the source stays read-only. Relative seed paths are resolved against the invocation directory.
 
 ```sh
-FSQL_SANDBOX_SEED=./tree-sitter-fsql/examples \
-  cargo sandbox:fsql -F "${PWD}/examples/inventory.fsql"
+export FSQL_SANDBOX_SEED="${PWD}/tree-sitter-fsql/examples"
+cargo sandbox:fsql -F "${PWD}/examples/inventory.fsql"
 ```
 
 Use paths under `/tmp/fsql-sandbox` for mutations. All sandbox files and journals disappear when that invocation ends; use multiple `-e` arguments or a query file to inspect mutations in the same run. Relative query files must exist in the copied tree; use an absolute host path for a read-only query file outside it.
