@@ -270,18 +270,7 @@ impl Evaluator {
         row: &dyn Row,
         any: bool,
     ) -> Result<Value> {
-        if !matches!(
-            op,
-            BinaryOperator::Glob
-                | BinaryOperator::Eq
-                | BinaryOperator::NotEq
-                | BinaryOperator::Gt
-                | BinaryOperator::Lt
-                | BinaryOperator::GtEq
-                | BinaryOperator::LtEq
-        ) {
-            return Err(Error::Unsupported(format!("quantified operator `{op}`")));
-        }
+        crate::expr::quantified_operator(op)?;
         let subject = self.eval(left, row)?;
         let right = unnest(right);
         if any

@@ -28,3 +28,24 @@ pub(crate) fn string_literal(expr: &Expr) -> Option<&str> {
         _ => None,
     }
 }
+
+/// Keep preparation and execution aligned on supported quantified operators.
+pub(crate) fn quantified_operator(op: &sqlparser::ast::BinaryOperator) -> crate::Result<()> {
+    use sqlparser::ast::BinaryOperator;
+    if matches!(
+        op,
+        BinaryOperator::Glob
+            | BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Gt
+            | BinaryOperator::Lt
+            | BinaryOperator::GtEq
+            | BinaryOperator::LtEq
+    ) {
+        Ok(())
+    } else {
+        Err(crate::Error::Unsupported(format!(
+            "quantified operator `{op}`"
+        )))
+    }
+}

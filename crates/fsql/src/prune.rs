@@ -15,7 +15,7 @@ impl Pruning {
     pub(crate) fn for_filter(filter: Option<&Expr>, alias: &str) -> Result<Self> {
         let mut patterns = Vec::new();
         if let Some(filter) = filter
-            && !subtree_exclusions(filter, alias, &mut patterns)
+            && !subtree_exclusions(filter, alias, &mut patterns, &mut true)
         {
             patterns.clear();
         }
@@ -44,16 +44,22 @@ impl Pruning {
 
 /// Only mandatory negative predicates can prove that descendants are excluded.
 /// In particular, never infer pruning from a directory failing a row predicate.
-fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) -> bool {
+fn subtree_exclusions(
+    expr: &Expr,
+    alias: &str,
+    patterns: &mut Vec<String>,
+    prefix_safe: &mut bool,
+) -> bool {
     use crate::expr::{constant_globs, unnest};
+    let mut safe = infallible_guard(expr, alias);
     match unnest(expr) {
         Expr::BinaryOp {
             left,
             op: BinaryOperator::And,
             right,
         } => {
-            return subtree_exclusions(left, alias, patterns)
-                && subtree_exclusions(right, alias, patterns);
+            return subtree_exclusions(left, alias, patterns, prefix_safe)
+                && subtree_exclusions(right, alias, patterns, prefix_safe);
         }
         Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
@@ -83,6 +89,7 @@ fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) -> b
                 {
                     return false;
                 }
+                safe = true;
                 for pattern in candidates {
                     // Escapes could change the meaning of the suffix boundary.
                     if pattern.contains('\\') {
@@ -96,6 +103,7 @@ fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) -> b
                         && !prefix.ends_with("**")
                         // Full candidates were validated atomically above.
                         && compile_glob(prefix).is_ok()
+                        && *prefix_safe
                     {
                         patterns.push(prefix.to_owned());
                     }
@@ -104,14 +112,51 @@ fn subtree_exclusions(expr: &Expr, alias: &str, patterns: &mut Vec<String>) -> b
         }
         _ => {}
     }
+    // AND evaluates left to right. An earlier exclusion can still prune, but
+    // later exclusions must not hide errors from an unproven predecessor.
+    *prefix_safe &= safe;
     true
 }
 
+/// Intentionally narrow proof: depth is available without metadata I/O and
+/// comparison with a representable integer cannot fail. In particular, kind
+/// may need a stat on filesystems without directory-entry type hints.
+fn infallible_guard(expr: &Expr, alias: &str) -> bool {
+    use crate::expr::unnest;
+    use sqlparser::ast::Value;
+    match unnest(expr) {
+        Expr::Value(value) => matches!(value.value, Value::Boolean(_) | Value::Null),
+        Expr::BinaryOp {
+            left,
+            op:
+                BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Gt
+                | BinaryOperator::Lt
+                | BinaryOperator::GtEq
+                | BinaryOperator::LtEq,
+            right,
+        } => {
+            let integer = |expr: &Expr| {
+                matches!(unnest(expr), Expr::Value(v)
+                if matches!(&v.value, Value::Number(n, _) if n.parse::<i64>().is_ok()))
+            };
+            (local_column(left, alias, "depth") && integer(right))
+                || (integer(left) && local_column(right, alias, "depth"))
+        }
+        _ => false,
+    }
+}
+
 fn local_relative_path(expr: &Expr, alias: &str) -> bool {
+    local_column(expr, alias, "relative_path")
+}
+
+fn local_column(expr: &Expr, alias: &str, column: &str) -> bool {
     match crate::expr::unnest(expr) {
-        Expr::Identifier(name) => name.value.eq_ignore_ascii_case("relative_path"),
+        Expr::Identifier(name) => name.value.eq_ignore_ascii_case(column),
         Expr::CompoundIdentifier(parts) => matches!(parts.as_slice(), [table, name]
-            if table.value.eq_ignore_ascii_case(alias) && name.value.eq_ignore_ascii_case("relative_path")),
+            if table.value.eq_ignore_ascii_case(alias) && name.value.eq_ignore_ascii_case(column)),
         _ => false,
     }
 }
@@ -136,7 +181,7 @@ mod tests {
         for (sql, expected) in [
             ("NOT (relative_path GLOB 'build/**')", true),
             (
-                "kind = 'file' AND NOT (f.relative_path GLOB SOME (ARRAY['build{,/**}']))",
+                "depth > 0 AND NOT (f.relative_path GLOB SOME (ARRAY['build{,/**}']))",
                 true,
             ),
             ("NOT (relative_path GLOB 'build')", false),
@@ -155,6 +200,43 @@ mod tests {
             ("NOT (relative_path GLOB 'build\\{,/**}')", false),
         ] {
             assert_eq!(policy(sql).excludes(Path::new("build")), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn pruning_respects_left_to_right_errors() {
+        for prefix in [
+            "1 / (depth - 2) > 0",
+            "size > 0",
+            "kind = 'file'",
+            "depth > 'bad'",
+        ] {
+            assert!(
+                policy(&format!(
+                    "{prefix} AND NOT (relative_path GLOB 'build{{,/**}}')"
+                ))
+                .is_empty()
+            );
+            assert!(
+                policy(&format!(
+                    "depth > 0 AND ({prefix} AND NOT (relative_path GLOB 'build{{,/**}}'))"
+                ))
+                .is_empty()
+            );
+            assert!(
+                policy(&format!(
+                    "NOT (relative_path GLOB 'build{{,/**}}') AND {prefix}"
+                ))
+                .excludes(Path::new("build"))
+            );
+        }
+        for prefix in ["depth > 0", "0 < f.depth", "true"] {
+            assert!(
+                policy(&format!(
+                    "{prefix} AND NOT (relative_path GLOB 'build{{,/**}}')"
+                ))
+                .excludes(Path::new("build"))
+            );
         }
     }
 

@@ -89,6 +89,23 @@ fn invalid_sql_is_rejected_before_any_scan() {
 }
 
 #[test]
+fn unsupported_quantified_operators_fail_during_preparation() {
+    let engine = Engine::new("/definitely/missing/fsql", WalkOptions::default());
+    for quantifier in ["ANY", "ALL", "SOME"] {
+        for rhs in ["ARRAY['x']", "SELECT 'x'"] {
+            for predicate in [
+                format!("name ~ {quantifier} ({rhs})"),
+                format!("false AND name ~ {quantifier} ({rhs})"),
+            ] {
+                let result =
+                    engine.prepare_query(&format!("SELECT name FROM files WHERE {predicate}"));
+                assert!(matches!(result, Err(Error::Unsupported(_))), "{predicate}");
+            }
+        }
+    }
+}
+
+#[test]
 fn mutation_paths_do_not_silently_discard_parent_components() {
     let fx = Fixture::new();
     fs::create_dir_all(fx.path("a/b")).unwrap();

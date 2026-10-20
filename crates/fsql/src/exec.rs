@@ -2011,6 +2011,37 @@ mod tests {
     }
 
     #[test]
+    fn pruning_preserves_errors_from_earlier_conjuncts() {
+        let dir = fixture("prune-errors");
+        // Only the excluded subtree contains depth-two files.
+        std::fs::remove_dir_all(dir.join("src")).unwrap();
+        let exclusion = "NOT (relative_path GLOB 'build{,/**}')";
+        for prefix in ["1 / (depth - 2) > 0", "depth > 0 AND 1 / (depth - 2) > 0"] {
+            let filter = format!("{prefix} AND {exclusion}");
+            for filter in [filter.clone(), format!("({filter}) IS TRUE")] {
+                let sql = format!("SELECT relative_path FROM files WHERE {filter}");
+                assert!(
+                    matches!(run_sql(&dir, &sql), Err(Error::DivideByZero)),
+                    "{sql}"
+                );
+                let engine = crate::Engine::new(&dir, WalkOptions::default());
+                assert!(matches!(
+                    engine
+                        .prepare_query(&sql)
+                        .unwrap()
+                        .stream(&mut |_, _| Ok(std::ops::ControlFlow::Continue(()))),
+                    Err(Error::DivideByZero)
+                ));
+            }
+        }
+        // An exclusion evaluated first legitimately avoids the error.
+        let sql =
+            format!("SELECT relative_path FROM files WHERE {exclusion} AND 1 / (depth - 2) > 0");
+        assert!(run_sql(&dir, &sql).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn invalid_glob_candidates_cannot_be_hidden_by_pruning() {
         let dir = fixture("invalid-pruning");
         std::fs::remove_dir_all(dir.join("src")).unwrap();
