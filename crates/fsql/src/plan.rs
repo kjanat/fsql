@@ -12,6 +12,7 @@ use crate::column::{Column, Table};
 use crate::dialect::FsqlDialect;
 use crate::error::{Error, Result};
 use crate::eval::{Evaluator, Row};
+use crate::expr::string_literal;
 use crate::value::Value;
 use crate::walk::WalkOptions;
 
@@ -20,6 +21,30 @@ pub struct Source {
     pub table: Table,
     pub root: PathBuf,
     pub options: WalkOptions,
+}
+
+impl Source {
+    /// Derive an internal scan root while retaining the public source boundary.
+    pub(crate) fn walker(
+        &self,
+        filter: Option<&Expr>,
+        pruning: crate::prune::Pruning,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<crate::walk::Walker> {
+        let mut options = self.options.clone();
+        let narrowed = if self.table == Table::Files && !options.one_filesystem {
+            filter.and_then(|filter| narrow(&self.root, filter))
+        } else {
+            None
+        };
+        let root = if let Some((root, depth)) = &narrowed {
+            options.initial_depth = options.initial_depth.saturating_add(*depth);
+            root
+        } else {
+            &self.root
+        };
+        crate::walk::Walker::cancellable_planned(root, &self.root, options, pruning, cancellation)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -320,7 +345,9 @@ impl Planner {
             Statement::Delete(delete) => self.delete(delete),
             Statement::Update(update) => self.update(update),
             Statement::Insert(insert) => self.insert(insert),
-            other => Err(Error::Unsupported(format!("statement `{other}`"))),
+            // Unsupported SQL can contain credentials (for example CREATE SECRET).
+            // Never render the statement into an error that callers may log.
+            _ => Err(Error::Unsupported("statement".to_owned())),
         }
     }
 
@@ -469,22 +496,11 @@ impl Planner {
             Some(Distinct::Distinct) => true,
             Some(Distinct::On(_)) => return Err(Error::Unsupported("DISTINCT ON".to_owned())),
         };
-        let mut from = select
+        let from = select
             .from
             .iter()
             .map(|item| self.clause(item, scope))
             .collect::<Result<Vec<_>>>()?;
-        if let [clause] = from.as_mut_slice()
-            && clause.joins.is_empty()
-            && let Relation::Table { source, .. } = &mut clause.relation
-            && source.table == Table::Files
-            && !source.options.one_filesystem
-            && let Some(filter) = &select.selection
-            && let Some((root, depth)) = narrow(&source.root, filter)
-        {
-            source.root = root;
-            source.options.initial_depth = depth;
-        }
         let projection = select
             .projection
             .iter()
@@ -642,11 +658,11 @@ impl Planner {
         }
     }
 
-    fn mutation_source(&self, item: &TableWithJoins, filter: &Expr) -> Result<(Source, String)> {
+    fn mutation_source(&self, item: &TableWithJoins) -> Result<(Source, String)> {
         if !item.joins.is_empty() {
             return Err(Error::Unsupported("JOIN in a mutation".to_owned()));
         }
-        let Relation::Table { mut source, alias } = self.relation(&item.relation, &[])? else {
+        let Relation::Table { source, alias } = self.relation(&item.relation, &[])? else {
             return Err(Error::Unsupported("subquery as mutation target".to_owned()));
         };
         if source.table != Table::Files {
@@ -654,12 +670,6 @@ impl Planner {
                 "`{}` is read only",
                 source.table.name()
             )));
-        }
-        if !source.options.one_filesystem
-            && let Some((root, depth)) = narrow(&source.root, filter)
-        {
-            source.root = root;
-            source.options.initial_depth = depth;
         }
         Ok((source, alias))
     }
@@ -676,7 +686,7 @@ impl Planner {
             return Err(Error::Unsupported("DELETE from multiple tables".to_owned()));
         };
         let filter = required_filter(delete.selection.as_ref(), "DELETE")?;
-        let (source, alias) = self.mutation_source(item, &filter)?;
+        let (source, alias) = self.mutation_source(item)?;
         let order_by = delete
             .order_by
             .iter()
@@ -700,7 +710,7 @@ impl Planner {
             return Err(Error::Unsupported("UPDATE OR".to_owned()));
         }
         let filter = required_filter(update.selection.as_ref(), "UPDATE")?;
-        let (source, alias) = self.mutation_source(&update.table, &filter)?;
+        let (source, alias) = self.mutation_source(&update.table)?;
         let assignments = update
             .assignments
             .iter()
@@ -943,17 +953,6 @@ fn is_column(expr: &Expr, column: Column) -> bool {
     }
 }
 
-fn string_literal(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Value(literal) => match &literal.value {
-            Literal::SingleQuotedString(s) | Literal::DoubleQuotedString(s) => Some(s),
-            _ => None,
-        },
-        Expr::Nested(inner) => string_literal(inner),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Hint {
     Prefix(String),
@@ -1127,6 +1126,19 @@ mod tests {
         assert!(!plan.order_by[1].nulls_first);
         assert_eq!(plan.limit, Some(10));
         assert_eq!(plan.offset, 5);
+    }
+
+    #[test]
+    fn unsupported_secret_statements_do_not_echo_input() {
+        for sql in [
+            "CREATE SECRET private_name (TYPE S3, KEY_ID 'test_key', SECRET 'test_password')",
+            "DROP SECRET private_name",
+        ] {
+            let error = one(sql).unwrap_err();
+            assert!(matches!(error, Error::Unsupported(_)));
+            assert_eq!(error.to_string(), "unsupported: statement");
+            assert_eq!(format!("{error:?}"), "Unsupported(\"statement\")");
+        }
     }
 
     #[test]

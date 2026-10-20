@@ -1,10 +1,13 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use globset::{GlobBuilder, GlobMatcher};
+use globset::{GlobMatcher, GlobSet};
+
+use crate::expr::{constant_globs, unnest};
+use crate::pattern::{compile_glob, compile_globs};
 use regex::bytes::Regex;
 use std::rc::Rc;
 
@@ -42,6 +45,7 @@ pub type SubqueryRunner = dyn Fn(&Query, Option<&dyn Row>) -> Result<ResultSet>;
 pub struct Evaluator {
     now: Nanos,
     globs: HashMap<String, GlobMatcher>,
+    glob_sets: BTreeMap<Vec<Expr>, Option<GlobSet>>,
     regexes: HashMap<String, Regex>,
     pub aggregates: HashMap<String, Value>,
     pub subqueries: Option<Rc<SubqueryRunner>>,
@@ -59,6 +63,7 @@ impl Evaluator {
         Self {
             now,
             globs: HashMap::new(),
+            glob_sets: BTreeMap::new(),
             regexes: HashMap::new(),
             aggregates: HashMap::new(),
             subqueries: None,
@@ -265,8 +270,48 @@ impl Evaluator {
         row: &dyn Row,
         any: bool,
     ) -> Result<Value> {
+        crate::expr::quantified_operator(op)?;
         let subject = self.eval(left, row)?;
+        let right = unnest(right);
+        if any
+            && *op == BinaryOperator::Glob
+            && let Expr::Array(array) = right
+        {
+            if array.elem.is_empty() {
+                return Ok(Value::Bool(false));
+            }
+            if subject.is_null()
+                && array
+                    .elem
+                    .iter()
+                    .all(|expr| crate::expr::string_literal(expr).is_some())
+            {
+                return Ok(Value::Null);
+            }
+            let key = array.elem.as_slice();
+            // Structural keys survive cloned expressions without allocating a
+            // vector of pattern strings or hashing every AST field on each row.
+            // Dynamic arrays are cached as such, but still evaluated per row.
+            if !self.glob_sets.contains_key(key) {
+                let compiled = constant_globs(right)
+                    .map(|patterns| compile_globs(patterns.iter().map(String::as_str)))
+                    .transpose()?;
+                self.glob_sets.insert(array.elem.clone(), compiled);
+            }
+            if let Some(set) = &self.glob_sets[key] {
+                let bytes = text_bytes(&subject)
+                    .ok_or_else(|| Error::Plan("GLOB subject must be text or bytes".into()))?;
+                return Ok(Value::Bool(
+                    set.is_match(Path::new(OsStr::from_bytes(&bytes))),
+                ));
+            }
+        }
         let candidates: Vec<Value> = match right {
+            Expr::Array(array) => array
+                .elem
+                .iter()
+                .map(|expr| self.eval(expr, row))
+                .collect::<Result<_>>()?,
             Expr::Subquery(query) => {
                 let set = self.subquery(query, row)?;
                 if set.headers.len() != 1 {
@@ -281,7 +326,12 @@ impl Evaluator {
         };
         let mut unknown = false;
         for candidate in candidates {
-            match compare(op, subject.clone(), candidate)? {
+            let result = if *op == BinaryOperator::Glob {
+                self.glob(subject.clone(), candidate)?
+            } else {
+                compare(op, subject.clone(), candidate)?
+            };
+            match result {
                 Value::Bool(true) if any => return Ok(Value::Bool(true)),
                 Value::Bool(false) if !any => return Ok(Value::Bool(false)),
                 Value::Bool(_) => {}
@@ -465,13 +515,7 @@ impl Evaluator {
             if self.globs.len() >= 64 {
                 self.globs.clear();
             }
-            let glob = GlobBuilder::new(pattern_text)
-                .literal_separator(false)
-                .build()
-                .map_err(|e| Error::InvalidPattern {
-                    pattern: pattern_text.clone(),
-                    reason: e.kind().to_string(),
-                })?;
+            let glob = compile_glob(pattern_text)?;
             self.globs
                 .insert(pattern_text.clone(), glob.compile_matcher());
         }
@@ -818,7 +862,8 @@ fn compare(op: &BinaryOperator, l: Value, r: Value) -> Result<Value> {
         BinaryOperator::Gt => ordering.is_gt(),
         BinaryOperator::Lt => ordering.is_lt(),
         BinaryOperator::GtEq => ordering.is_ge(),
-        _ => ordering.is_le(),
+        BinaryOperator::LtEq => ordering.is_le(),
+        _ => return Err(Error::Unsupported(format!("comparison operator `{op}`"))),
     }))
 }
 
@@ -1331,6 +1376,103 @@ mod tests {
 
     fn truth(sql: &str) -> Option<bool> {
         eval(sql).expect(sql).truth()
+    }
+
+    #[test]
+    fn quantified_operators_are_explicit() {
+        for sql in [
+            "'a' ~ ANY (ARRAY['z'])",
+            "'a' ~ ALL (ARRAY[])",
+            "NULL ~ ANY (ARRAY[])",
+            "'a' ~ ANY (ARRAY[NULL])",
+        ] {
+            assert!(matches!(eval(sql), Err(Error::Unsupported(_))), "{sql}");
+        }
+        for op in ["=", "<>", ">", "<", ">=", "<="] {
+            assert_eq!(truth(&format!("1 {op} ANY (ARRAY[])")), Some(false));
+            assert_eq!(truth(&format!("1 {op} ALL (ARRAY[])")), Some(true));
+        }
+        assert_eq!(truth("2 <= ANY (ARRAY[1, 2])"), Some(true));
+        assert_eq!(truth("2 < ALL (ARRAY[2, 3])"), Some(false));
+    }
+
+    #[test]
+    fn empty_glob_alternatives_match_directories_and_descendants() {
+        for value in ["target", "target/file", "src/target", "src/target/file"] {
+            for predicate in [
+                "GLOB '**/target{,/**}'",
+                "GLOB ANY (ARRAY['**/target{,/**}'])",
+                "GLOB ALL (ARRAY['**/target{,/**}'])",
+            ] {
+                assert_eq!(truth(&format!("'{value}' {predicate}")), Some(true));
+            }
+        }
+        assert_eq!(truth("'target-other' GLOB '**/target{,/**}'"), Some(false));
+        assert_eq!(
+            truth("'x.tmp' GLOB ANY (ARRAY[name || '{,/**}'])"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn glob_any_arrays_follow_three_valued_logic() {
+        for (sql, expected) in [
+            ("name GLOB ANY (ARRAY['*.rs', '*.{tmp,log}'])", Some(true)),
+            ("NOT (name GLOB ANY (ARRAY['*.rs', '*.tmp']))", Some(false)),
+            ("name GLOB ANY (ARRAY['*.rs', '*.go'])", Some(false)),
+            ("name GLOB ANY (ARRAY[])", Some(false)),
+            ("NULL GLOB ANY (ARRAY[])", Some(false)),
+            ("NULL GLOB ANY (ARRAY['*'])", None),
+            ("NULL GLOB ANY (ARRAY['['])", None),
+            ("name GLOB SOME (ARRAY['*.tmp'])", Some(true)),
+            ("name GLOB ALL (ARRAY['x.*', '*.tmp'])", Some(true)),
+            ("name GLOB ALL (ARRAY['*.rs', '*.tmp'])", Some(false)),
+            ("name GLOB ALL (ARRAY[NULL, '*.tmp'])", None),
+            ("name GLOB ALL (ARRAY[NULL, '*.rs'])", Some(false)),
+            ("NULL GLOB ALL (ARRAY[])", Some(true)),
+            ("name GLOB ANY (ARRAY[NULL, '*.tmp'])", Some(true)),
+            ("name GLOB ANY (ARRAY[NULL, '*.rs'])", None),
+            ("name GLOB ANY (ARRAY[name])", Some(true)),
+            ("name GLOB ANY ((ARRAY['*.tmp'])) AND size > 0", Some(true)),
+        ] {
+            assert_eq!(truth(sql), expected, "{sql}");
+        }
+        assert!(eval("name GLOB ANY (ARRAY['['])").is_err());
+        assert!(eval("name GLOB ANY (ARRAY[1])").is_err());
+    }
+
+    #[test]
+    fn constant_glob_array_is_cached_as_one_set() {
+        let expr = Parser::new(&FsqlDialect)
+            .try_with_sql("name GLOB ANY (ARRAY['*.rs', '*.{tmp,log}'])")
+            .unwrap()
+            .parse_expr()
+            .unwrap();
+        let mut evaluator = Evaluator::default();
+        for _ in 0..3 {
+            assert_eq!(
+                evaluator.eval(&expr.clone(), &row()).unwrap(),
+                Value::Bool(true)
+            );
+        }
+        assert_eq!(evaluator.glob_sets.len(), 1);
+        assert!(evaluator.globs.is_empty());
+    }
+
+    #[test]
+    fn dynamic_glob_arrays_do_not_cache_row_values() {
+        let expr = Parser::new(&FsqlDialect)
+            .try_with_sql("'x.tmp' GLOB ANY (ARRAY[name])")
+            .unwrap()
+            .parse_expr()
+            .unwrap();
+        let mut evaluator = Evaluator::default();
+        assert_eq!(evaluator.eval(&expr, &row()).unwrap(), Value::Bool(true));
+        let mut other = row();
+        other.0.insert("name".into(), Value::Text("*.rs".into()));
+        assert_eq!(evaluator.eval(&expr, &other).unwrap(), Value::Bool(false));
+        assert_eq!(evaluator.glob_sets.len(), 1);
+        assert!(evaluator.glob_sets.values().all(Option::is_none));
     }
 
     #[test]

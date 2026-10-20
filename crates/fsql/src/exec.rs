@@ -18,7 +18,6 @@ use crate::plan::{
     SetBody, SetOp, Source,
 };
 use crate::value::{Value, ValueKey, row_key};
-use crate::walk::Walker;
 
 pub struct MapRow(pub HashMap<String, Value>);
 
@@ -158,17 +157,24 @@ pub struct Context {
 type Scope = HashMap<String, Rc<ResultSet>>;
 
 pub fn base_rows<'a>(source: &Source) -> Result<RowStream<'a>> {
-    base_rows_cancellable(source, &crate::CancellationToken::default())
+    base_rows_cancellable(
+        source,
+        None,
+        &crate::CancellationToken::default(),
+        crate::prune::Pruning::default(),
+    )
 }
 
 fn base_rows_cancellable<'a>(
     source: &Source,
+    filter: Option<&Expr>,
     cancellation: &crate::CancellationToken,
+    pruning: crate::prune::Pruning,
 ) -> Result<RowStream<'a>> {
     if source.table == Table::Mounts {
         return crate::mounts::rows();
     }
-    let walker = Walker::cancellable(&source.root, source.options.clone(), cancellation)?;
+    let walker = source.walker(filter, pruning, cancellation)?;
     match source.table {
         Table::Files => {
             Ok(Box::new(walker.map(|entry| {
@@ -296,7 +302,13 @@ pub fn stream(
     if plan.limit == Some(0) {
         return Ok(Completion::default());
     }
-    let bound = bind(&select.from[0].relation, &ctx, &Scope::new(), None)?;
+    let bound = bind(
+        &select.from[0].relation,
+        &ctx,
+        &Scope::new(),
+        None,
+        select.filter.as_ref(),
+    )?;
     let prepared = prepare(select, &[(bound.alias.clone(), bound.columns)])?;
     let mut evaluator = evaluator(&ctx, &Scope::new());
     let mut skipped = 0;
@@ -714,6 +726,11 @@ pub fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr) -> bool) {
                 visit(item, f);
             }
         }
+        Expr::Array(array) => {
+            for expr in &array.elem {
+                visit(expr, f);
+            }
+        }
         Expr::InSubquery { expr, .. } => visit(expr, f),
         Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
             visit(left, f);
@@ -1071,6 +1088,7 @@ fn bind<'a>(
     ctx: &Rc<Context>,
     scope: &Scope,
     outer: Option<&'a dyn Row>,
+    filter: Option<&Expr>,
 ) -> Result<Bound<'a>> {
     match relation {
         Relation::Table { source, alias } => Ok(Bound {
@@ -1081,7 +1099,16 @@ fn bind<'a>(
                 .iter()
                 .map(|c| (*c).to_owned())
                 .collect(),
-            rows: base_rows_cancellable(source, &ctx.control.options.cancellation)?,
+            rows: base_rows_cancellable(
+                source,
+                filter,
+                &ctx.control.options.cancellation,
+                if source.table == Table::Files {
+                    crate::prune::Pruning::for_filter(filter, alias)?
+                } else {
+                    crate::prune::Pruning::default()
+                },
+            )?,
         }),
         Relation::Cte { name, alias } => {
             let set = scope
@@ -1516,7 +1543,13 @@ fn select_rows(
             outer,
         ))))
     } else if streaming {
-        let bound = bind(&plan.from[0].relation, ctx, scope, outer)?;
+        let bound = bind(
+            &plan.from[0].relation,
+            ctx,
+            scope,
+            outer,
+            plan.filter.as_ref(),
+        )?;
         relations.push((bound.alias.clone(), bound.columns.clone()));
         let alias = bound.alias;
         Box::new(
@@ -1528,7 +1561,7 @@ fn select_rows(
         let mut product: Vec<JoinRow<'_>> = Vec::new();
         let mut first = true;
         for clause in &plan.from {
-            let bound = bind(&clause.relation, ctx, scope, outer)?;
+            let bound = bind(&clause.relation, ctx, scope, outer, None)?;
             relations.push((bound.alias.clone(), bound.columns.clone()));
             let alias = bound.alias.clone();
             let (base, base_names) = materialize(bound, &names, ctx)?;
@@ -1542,7 +1575,7 @@ fn select_rows(
                 })
                 .collect();
             for spec in &clause.joins {
-                let bound = bind(&spec.relation, ctx, scope, outer)?;
+                let bound = bind(&spec.relation, ctx, scope, outer, None)?;
                 relations.push((bound.alias.clone(), bound.columns.clone()));
                 let right_alias = bound.alias.clone();
                 let (right, right_names) = materialize(bound, &names, ctx)?;
@@ -1942,6 +1975,253 @@ mod tests {
 
     fn texts(set: &ResultSet, column: usize) -> Vec<String> {
         set.rows.iter().map(|r| render(&r[column])).collect()
+    }
+
+    #[test]
+    fn narrowing_accepts_relative_and_symlink_sources() {
+        let relative = PathBuf::from(format!("target/relative-source-{}", std::process::id()));
+        std::fs::create_dir_all(relative.join("tree/src")).unwrap();
+        std::fs::write(relative.join("tree/src/file"), b"x").unwrap();
+        let canonical = std::fs::canonicalize(relative.join("tree")).unwrap();
+        std::os::unix::fs::symlink("tree", relative.join("alias")).unwrap();
+        for root in [
+            relative.join("tree"),
+            relative.join("alias"),
+            canonical.clone(),
+        ] {
+            let sql = format!(
+                "select relative_path from files('{}') where path = '{}/src/file'",
+                root.display(),
+                canonical.display()
+            );
+            let set = run_sql(&canonical, &sql).unwrap();
+            assert_eq!(texts(&set, 0), ["src/file"]);
+            let engine = crate::Engine::new(&canonical, WalkOptions::default());
+            let prepared = engine.prepare_query(&sql).unwrap();
+            let mut paths = Vec::new();
+            prepared
+                .stream(&mut |_, row| {
+                    paths.push(row[0].clone());
+                    Ok(std::ops::ControlFlow::Continue(()))
+                })
+                .unwrap();
+            assert_eq!(paths, [Value::Text("src/file".into())]);
+        }
+        std::fs::remove_dir_all(relative).unwrap();
+    }
+
+    #[test]
+    fn pruning_preserves_errors_from_earlier_conjuncts() {
+        let dir = fixture("prune-errors");
+        // Only the excluded subtree contains depth-two files.
+        std::fs::remove_dir_all(dir.join("src")).unwrap();
+        let exclusion = "NOT (relative_path GLOB 'build{,/**}')";
+        for prefix in ["1 / (depth - 2) > 0", "depth > 0 AND 1 / (depth - 2) > 0"] {
+            let filter = format!("{prefix} AND {exclusion}");
+            for filter in [filter.clone(), format!("({filter}) IS TRUE")] {
+                let sql = format!("SELECT relative_path FROM files WHERE {filter}");
+                assert!(
+                    matches!(run_sql(&dir, &sql), Err(Error::DivideByZero)),
+                    "{sql}"
+                );
+                let engine = crate::Engine::new(&dir, WalkOptions::default());
+                assert!(matches!(
+                    engine
+                        .prepare_query(&sql)
+                        .unwrap()
+                        .stream(&mut |_, _| Ok(std::ops::ControlFlow::Continue(()))),
+                    Err(Error::DivideByZero)
+                ));
+            }
+        }
+        // An exclusion evaluated first legitimately avoids the error.
+        let sql =
+            format!("SELECT relative_path FROM files WHERE {exclusion} AND 1 / (depth - 2) > 0");
+        assert!(run_sql(&dir, &sql).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_glob_candidates_cannot_be_hidden_by_pruning() {
+        let dir = fixture("invalid-pruning");
+        std::fs::remove_dir_all(dir.join("src")).unwrap();
+        std::fs::remove_file(dir.join("README")).unwrap();
+        for patterns in ["'build{,/**}', '['", "'[', 'build{,/**}'"] {
+            let sql = format!(
+                "select path from files where kind = 'file' and not (relative_path glob any (array[{patterns}]))"
+            );
+            assert!(matches!(
+                run_sql(&dir, &sql),
+                Err(Error::InvalidPattern { .. })
+            ));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn relative_paths_and_pruning_ignore_display_depth_offsets() {
+        let dir = fixture("relative-offset");
+        std::fs::create_dir_all(dir.join("src/build/nested")).unwrap();
+        std::fs::write(dir.join("src/build/nested/hidden.rs"), b"x").unwrap();
+        let planner = Planner::new(
+            &dir,
+            WalkOptions {
+                initial_depth: 2,
+                ..WalkOptions::default()
+            },
+        );
+        for (sql, expected) in [
+            ("select relative_path from files where depth = 2".to_owned(), vec![""]),
+            (format!("select relative_path from files where path glob '{}/src/**' and not (relative_path glob any (array['**/build{{,/**}}'])) order by relative_path", dir.display()), vec!["src/lib.rs", "src/main.rs"]),
+            (format!("select depth from files where path = '{}/src/main.rs'", dir.display()), vec!["4"]),
+            ("select relative_path from files where not (relative_path glob 'build{,/**}') and name = 'build' order by relative_path".to_owned(), vec!["src/build"]),
+        ] {
+            let Plan::Select(plan) = planner.plan(&sql).unwrap().remove(0) else {
+                panic!("select");
+            };
+            let set = run(&plan, &planner, &mut |error| panic!("{error}")).unwrap();
+            assert_eq!(texts(&set, 0), expected, "{sql}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn relative_paths_survive_narrowing_and_aliases() {
+        let dir = fixture("relative");
+        let set = run_sql(&dir, "select relative_path from files where depth = 0").unwrap();
+        assert_eq!(texts(&set, 0), [""]);
+        let set = run_sql(
+            &dir,
+            &format!(
+                "select f.relative_path from files f where path = '{}'",
+                dir.join("src/main.rs").display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(texts(&set, 0), ["src/main.rs"]);
+        let set = run_sql(&dir, "select relative_path from files where kind = 'file' and name glob any (array['*.rs']) order by relative_path").unwrap();
+        assert_eq!(texts(&set, 0), ["src/lib.rs", "src/main.rs"]);
+        assert!(
+            run_sql(
+                &dir,
+                "select name from files where name glob any (array[missing_column])"
+            )
+            .is_err()
+        );
+        use std::os::unix::ffi::OsStrExt;
+        let raw = b"src/invalid-\xff.tmp";
+        std::fs::write(dir.join(std::ffi::OsStr::from_bytes(raw)), b"x").unwrap();
+        let set = run_sql(
+            &dir,
+            "select relative_path from files where name glob any (array['invalid-*'])",
+        )
+        .unwrap();
+        assert_eq!(set.rows, [vec![Value::Blob(raw.to_vec())]]);
+        let set = run_sql(&dir, "select o.relative_path from files o where o.name = 'main.rs' and exists (select 1 from files i where i.name = 'out.tmp' and not (o.relative_path glob any (array['build{,/**}'])))").unwrap();
+        assert_eq!(texts(&set, 0), ["src/main.rs"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subtree_pruning_preserves_results_and_skips_descendants() {
+        let dir = fixture("pruning");
+        std::fs::create_dir_all(dir.join("src/build/nested")).unwrap();
+        std::fs::write(dir.join("src/build/nested/keep.rs"), b"x").unwrap();
+        let mut filters = vec![
+            "kind = 'file' AND NOT (relative_path GLOB ANY (ARRAY['**/build{,/**}']))",
+            "NOT (relative_path GLOB ANY (ARRAY['build/**']))",
+            "NOT (relative_path GLOB ANY (ARRAY['build{,/**}'])) OR name = 'out.tmp'",
+            "NOT (relative_path GLOB ANY (ARRAY['build']))",
+            "NOT (relative_path GLOB ANY (ARRAY['**/build/**'])) AND kind = 'file'",
+            "NOT (relative_path GLOB 'build{,/**}')",
+            "NOT (name GLOB ANY (ARRAY['build{,/**}']))",
+            "NOT (relative_path GLOB '**{,/**}')",
+            "NOT (relative_path GLOB 'build/**{,/**}')",
+            "NOT (relative_path GLOB '**/*{,/**}')",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        filters.push(format!(
+            "path GLOB '{}/src/**' AND NOT (relative_path GLOB ANY (ARRAY['src/build{{,/**}}']))",
+            dir.display()
+        ));
+        for filter in filters {
+            let planner = Planner::new(&dir, WalkOptions::default());
+            let Plan::Select(mut plan) = planner
+                .plan(&format!(
+                    "select relative_path from files where {filter} order by relative_path"
+                ))
+                .unwrap()
+                .remove(0)
+            else {
+                panic!("select");
+            };
+            let optimized = run(&plan, &planner, &mut |e| panic!("{e}")).unwrap();
+            let SetBody::Select(select) = &mut plan.body else {
+                panic!("select");
+            };
+            let Relation::Table { source, alias } = &select.from[0].relation else {
+                panic!("table");
+            };
+            let pruning = crate::prune::Pruning::for_filter(select.filter.as_ref(), alias).unwrap();
+            let pruned = !pruning.is_empty();
+            let visited =
+                base_rows_cancellable(source, None, &crate::CancellationToken::default(), pruning)
+                    .unwrap()
+                    .count();
+            let unpruned = base_rows(source).unwrap().count();
+            if pruned {
+                assert!(visited < unpruned, "{filter}");
+            } else {
+                assert_eq!(visited, unpruned);
+            }
+            // IS TRUE preserves WHERE truth semantics while deliberately
+            // preventing the conservative optimizer from recognizing this filter.
+            select.filter = select
+                .filter
+                .take()
+                .map(|filter| Expr::IsTrue(Box::new(filter)));
+            let plain = run(&plan, &planner, &mut |e| panic!("{e}")).unwrap();
+            assert_eq!(optimized.rows, plain.rows, "{filter}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn quantified_glob_subqueries_use_normal_query_semantics() {
+        let dir = fixture("glob-subqueries");
+        for (sql, expected) in [
+            (
+                "select 'main.rs' glob any (select '*.rs')",
+                Value::Bool(true),
+            ),
+            (
+                "select 'main.rs' glob some (values ('*.rs'), ('*.txt'))",
+                Value::Bool(true),
+            ),
+            (
+                "select 'main.rs' glob all (select '*.txt')",
+                Value::Bool(false),
+            ),
+            (
+                "select 'main.rs' glob any (select name from files where false)",
+                Value::Bool(false),
+            ),
+            (
+                "select 'main.rs' glob all (select name from files where false)",
+                Value::Bool(true),
+            ),
+            (
+                "select 'main.rs' glob any (with patterns as (select '*.rs' as pattern) select pattern from patterns)",
+                Value::Bool(true),
+            ),
+        ] {
+            assert_eq!(run_sql(&dir, sql).unwrap().rows, [vec![expected]], "{sql}");
+        }
+        let set = run_sql(&dir, "select f.relative_path from files f where f.kind = 'file' and f.name glob any (select '*.rs' where f.ext = 'rs') order by f.relative_path").unwrap();
+        assert_eq!(texts(&set, 0), ["src/lib.rs", "src/main.rs"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

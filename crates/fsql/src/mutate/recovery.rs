@@ -934,7 +934,7 @@ fn undo_locked(base: &Path, id: &str) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::walk::WalkOptions;
+    use crate::walk::{WalkOptions, Walker};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};

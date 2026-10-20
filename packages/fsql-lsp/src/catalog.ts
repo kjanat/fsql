@@ -4,7 +4,7 @@ import { CompletionItemKind } from 'vscode-languageserver';
 // Built-in schema from crates/fsql/src/column.rs; functions from bind.rs/eval.rs.
 export const tables: Record<string, string[]> = {
 	files:
-		'path name parent ext depth hidden kind size blocks mode perms setuid setgid sticky uid gid user group nlink inode dev atime mtime ctime btime target broken'
+		'path relative_path name parent ext depth hidden kind size blocks mode perms setuid setgid sticky uid gid user group nlink inode dev atime mtime ctime btime target broken'
 			.split(' '),
 	mounts: 'mountpoint fstype source options readonly dev mnt_id topology transport media case_sensitive remote'.split(
 		' ',
@@ -51,7 +51,7 @@ const functions: Record<string, string> = {
 };
 
 const keywords =
-	'SELECT FROM WHERE AS DISTINCT ALL JOIN INNER LEFT RIGHT FULL OUTER CROSS ON USING GROUP BY HAVING ORDER ASC DESC NULLS FIRST LAST LIMIT OFFSET UNION EXCEPT INTERSECT WITH RECURSIVE VALUES INSERT INTO UPDATE SET DELETE RETURNING AND OR XOR NOT IS NULL TRUE FALSE IN EXISTS BETWEEN CASE WHEN THEN ELSE END LIKE ILIKE GLOB REGEXP MATCH INTERVAL'
+	'SELECT FROM WHERE AS DISTINCT ALL JOIN INNER LEFT RIGHT FULL OUTER CROSS ON USING GROUP BY HAVING ORDER ASC DESC NULLS FIRST LAST LIMIT OFFSET UNION EXCEPT INTERSECT WITH RECURSIVE VALUES INSERT INTO UPDATE SET DELETE RETURNING AND OR XOR NOT IS NULL TRUE FALSE IN EXISTS BETWEEN CASE WHEN THEN ELSE END LIKE ILIKE GLOB ANY SOME ARRAY REGEXP MATCH INTERVAL'
 		.split(' ');
 
 export const catalog: CompletionItem[] = [

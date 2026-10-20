@@ -1,3 +1,4 @@
-/target
-/node_modules/
+/*.fsql
 /datafusion*
+/node_modules/
+/target
