@@ -103,11 +103,11 @@ These are SQL rewrites, not engine changes. The original remains a regression ba
 ## Rust benchmarks
 
 ```sh
-cargo bench:engine --test                       # run every correctness assertion once
-cargo bench:engine policy                       # original / pruned / joined / indexed hell
-cargo bench:engine pruning                      # identical results, with/without traversal pruning
-cargo bench:engine relational                   # ON nested loop versus USING index
-cargo bench:engine glob_sets                    # scalar OR versus constant GLOB ANY
+cargo bench:engine --test     # run every correctness assertion once
+cargo bench:engine policy     # original / pruned / joined / indexed hell
+cargo bench:engine pruning    # identical results, with/without traversal pruning
+cargo bench:engine relational # ON nested loop versus USING index
+cargo bench:engine glob_sets  # scalar OR versus constant GLOB ANY
 cargo bench:engine --save-baseline before
 cargo bench:engine --baseline before
 ```

@@ -32,8 +32,8 @@ TSV results go to stdout; root, run settings and ScanStats go to stderr. Save re
 
 ```sh
 mkdir -p target/benchmarks
-cargo bench:layers /absolute/path/to/input all 25 2 > target/benchmarks/layers.tsv
-cargo bench:alloc /absolute/path/to/input all 3 1 > target/benchmarks/allocations.tsv
+cargo bench:layers /absolute/path/to/input all 25 2 >target/benchmarks/layers.tsv
+cargo bench:alloc /absolute/path/to/input all 3 1 >target/benchmarks/allocations.tsv
 ```
 
 Timing uses the normal system allocator. **The allocation executable is separate** and uses stats_alloc only as a development dependency; no unsafe code is added to either library. Its timing columns include instrumentation overhead and must not be compared with the timing executable. Allocation columns are per measured iteration (integer averages), separating allocations and reallocations. `bytes_allocated` follows stats_alloc's definition, including positive reallocation growth; it is not RSS, peak memory, or the sum of full requested realloc sizes. Normal timing runs have zero allocation counters because their allocator is not instrumented. Preparation and teardown inside the measured operation are included; fixture creation, oracle verification and governor installation are excluded.
@@ -46,8 +46,8 @@ Build first, then invoke the executable directly to avoid profiling Cargo. Bench
 
 ```sh
 set -o pipefail
-layers_bin=$(cargo bench --package fsql --bench layers --no-run --locked --message-format=json |
-  python3 -c 'import json, sys; artifacts = [json.loads(line) for line in sys.stdin]; paths = [a["executable"] for a in artifacts if a.get("reason") == "compiler-artifact" and a.get("target", {}).get("name") == "layers" and a.get("executable")]; assert len(paths) == 1, paths; print(paths[0])')
+layers_bin=$(cargo bench --package fsql --bench layers --no-run --locked --message-format=json \
+  | python3 -c 'import json, sys; artifacts = [json.loads(line) for line in sys.stdin]; paths = [a["executable"] for a in artifacts if a.get("reason") == "compiler-artifact" and a.get("target", {}).get("name") == "layers" and a.get("executable")]; assert len(paths) == 1, paths; print(paths[0])')
 mkdir -p target/benchmarks
 perf record -o target/benchmarks/layers.perf -- "$layers_bin" /absolute/path/to/input scan-count 100 2 2>&1 | envctl redact
 perf report --stdio -i target/benchmarks/layers.perf 2>&1 | envctl redact

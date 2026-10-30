@@ -68,13 +68,13 @@ cargo install --git https://github.com/kjanat/fsql fsql-cli --bin fsql
 ## Input
 
 ```sh
-fsql -e SQL            # one or more statements from the argument, repeatable
-fsql --from-file FILE  # statements loaded from a file
-fsql -F FILE           # short form of --from-file
-fsql --from-file -     # statements loaded from stdin
-fsql FILE              # statements from a file
-fsql -                 # statements from stdin
-fsql < script.fsql     # same
+fsql -e SQL           # one or more statements from the argument, repeatable
+fsql --from-file FILE # statements loaded from a file
+fsql -F FILE          # short form of --from-file
+fsql --from-file -    # statements loaded from stdin
+fsql FILE             # statements from a file
+fsql -                # statements from stdin
+fsql <script.fsql     # same
 ```
 
 `--from-file` and the positional `FILE` are alternatives; use one per invocation. `-f` selects the output format (for example, `-f json`).
@@ -233,9 +233,9 @@ Each applied statement writes a journal under `$XDG_DATA_HOME/fsql/journal` (ove
 Every visible step has a durable replay record and an inverse. Completion checkpoints are published atomically after synchronizing filesystem changes. Interrupted operations appear as `[RECOVERY REQUIRED]` in the journal list:
 
 ```sh
-fsql journal          # list active journals
-fsql recover ID       # finish prepared entries, or resume an interrupted undo
-fsql undo ID          # reverse applied steps, including an interrupted apply
+fsql journal    # list active journals
+fsql recover ID # finish prepared entries, or resume an interrupted undo
+fsql undo ID    # reverse applied steps, including an interrupted apply
 ```
 
 Recovery discards incomplete private preparations and finishes entries whose preparation was durably recorded. It does not rerun the SQL or apply rows that had not reached preparation. Undo can reverse a partially applied entry even when its remaining forward step cannot succeed. Both commands can be interrupted and retried; completed steps are checkpointed. A finished undo retains completion records, hidden from `fsql journal`, so repeated recovery is harmless. The library exposes the same behavior through `fsql::mutate::{recover, undo}`.
