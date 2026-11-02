@@ -47,7 +47,7 @@ jobs:
       - *checkout
       - parallel: [*toolchain, *mise]
       - name: Check formatting
-        uses: kjanat/dprint-check@29c42153a7346f4d7315883ff7722cfe22cd510c # v3
+        uses: kjanat/dprint-check@b6a885d3403db5e40ed59f2c27917d758381f577 # v3
 
   bench:
     if: &notCancelled ${{ !cancelled() }}
