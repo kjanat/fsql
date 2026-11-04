@@ -28,7 +28,7 @@ walkdir     = "2.5.0"
 
 [workspace.dependencies.tree-fucker]
 git = "https://github.com/kjanat/tree-fucker"
-rev = "356519b0914470cad16674a3cfeddec447852dcf"
+rev = "4e88fa54b1385bf3b638c54a2a813d422e95d108"
 
 [workspace.lints]
 clippy  = {}
