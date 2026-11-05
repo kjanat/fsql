@@ -1,6 +1,6 @@
 # Layer benchmarks and profiles
 
-Run from the repository root. These are Cargo `[[bench]]` targets with `harness = false`, using the optimized bench profile and a custom in-process measurement harness. They complement the CLI and Criterion benchmarks. Each repository builds against its own dependency graph: fsql measures its pinned tree-fucker revision; tree-fucker measures its local library. No sibling checkout or temporary source package is required.
+Run from the repository root. These are Cargo `[[bench]]` targets with `harness = false`, using the optimized bench profile and a custom in-process measurement harness. They complement the CLI and Criterion benchmarks. Each repository builds against its own dependency graph: fsql measures crates.io `tree-fucker` 0.1.0; tree-fucker measures its local library. No sibling checkout or temporary source package is required.
 
 ```sh
 cargo bench:layers --test
