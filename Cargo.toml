@@ -4,12 +4,13 @@ members  = ["crates/*", "editors/zed/"]
 exclude  = ["vendor"]
 
 [workspace.package]
+version    = "0.1.0"
 edition    = "2024"
 repository = "https://github.com/kjanat/fsql"
 license    = "MIT"
 
 [workspace.dependencies]
-fsql      = { path = "crates/fsql" }
+fsql      = { path = "crates/fsql", "version" = "0.1.0" }
 sqlparser = { path = "vendor/sqlparser" }
 
 clap        = { version = "4.6.6", features = ["derive"] }

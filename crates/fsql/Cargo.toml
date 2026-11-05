@@ -1,10 +1,10 @@
 [package]
-name                 = "fsql"
-version              = "0.1.0"
-edition.workspace    = true
-description          = "SQL query and mutation engine over the filesystem"
-repository.workspace = true
-license.workspace    = true
+name        = "fsql"
+version     = { workspace = true }
+edition     = { workspace = true }
+description = "SQL query and mutation engine over the filesystem"
+repository  = { workspace = true }
+license     = { workspace = true }
 
 [[bench]]
 harness = false
