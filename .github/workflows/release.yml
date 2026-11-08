@@ -25,7 +25,7 @@ jobs:
     outputs:
       context: ${{ steps.release.outputs.context }}
     steps:
-      - uses: kjanat/beepboop/actions/begin@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+      - uses: kjanat/beepboop/actions/begin@v1
         id: release
         with:
           execution-id: ${{ inputs.beepboop_execution_id }}
@@ -84,7 +84,7 @@ jobs:
             printf '%s\n' "${pending}"
             echo "${delimiter}"
           } >> "${GITHUB_OUTPUT}"
-      - uses: kjanat/beepboop/actions/credentials@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+      - uses: kjanat/beepboop/actions/credentials@v1
         if: steps.pending.outputs.list != ''
         id: credentials
         with: { aliases: '["crates-io"]' }
@@ -151,9 +151,9 @@ jobs:
           exit "${status}"
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with: { subject-path: "target/package/*.crate" }
-      - uses: kjanat/beepboop/actions/report@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+      - uses: kjanat/beepboop/actions/report@v1
         with: { publications: "${{ steps.report.outputs.publications }}" }
-      - uses: kjanat/beepboop/actions/token@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+      - uses: kjanat/beepboop/actions/token@v1
         id: beepboop
         with:
           execution-id: ${{ inputs.beepboop_execution_id }}
@@ -175,9 +175,9 @@ jobs:
             gh api --method POST --header "Content-Type: application/octet-stream" --input "target/package/${asset}" \
               "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${asset}"
           done < <(python3 -B scripts/release.py crates)
-      - uses: kjanat/beepboop/actions/publish-refs@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+      - uses: kjanat/beepboop/actions/publish-refs@v1
         env:
           GIT_COMMITTER_NAME: ${{ steps.beepboop.outputs.bot-login }}
           GIT_COMMITTER_EMAIL: ${{ steps.beepboop.outputs.bot-email }}
         with: { token: "${{ steps.beepboop.outputs.token }}" }
-      - uses: kjanat/beepboop/actions/publish-release@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+      - uses: kjanat/beepboop/actions/publish-release@v1
