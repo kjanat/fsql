@@ -1,6 +1,6 @@
 #:schema dprint.schema.json
 
-extends  = "https://cdn.jsdelivr.net/gh/kjanat/kjanat/configs/dprint.remote.json"
+extends  = ["https://raw.githubusercontent.com/kjanat/kjanat/refs/heads/master/configs/dprint.remote.json"]
 excludes = [
   "**/target",
   "**/node_modules",
@@ -20,12 +20,10 @@ exts    = ["rs"]
 textWrap = "never"
 
 [typescript]
-"module.sortImportDeclarations"         = "maintain"
-"module.sortExportDeclarations"         = "maintain"
-"exportDeclaration.sortNamedExports"    = "maintain"
-"exportDeclaration.sortTypeOnlyExports" = "none"
-"importDeclaration.sortNamedImports"    = "maintain"
-"importDeclaration.sortTypeOnlyImports" = "none"
+"module.sortImportDeclarations"      = "maintain"
+"module.sortExportDeclarations"      = "maintain"
+"exportDeclaration.sortNamedExports" = "maintain"
+"importDeclaration.sortNamedImports" = "maintain"
 
 # TODO: follow-up on this crash at 445826ebabf469e54d00652aa789a7e5bc447cc5
 # on: kjanat/svg, kjanat/dprint-plugin-svg
