@@ -59,7 +59,7 @@ jobs:
           if [ "${stream}" = main ]; then
             cargo package --locked -p fsql-sqlparser
           else
-            cargo check --locked --offline -p fsql-cli
+            cargo check --locked -p fsql-cli
           fi
 
   publish:
