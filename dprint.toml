@@ -11,7 +11,6 @@ excludes = [
   "tree-sitter-fsql/src/**",
   "tree-sitter-fsql/test/corpus/**"
 ]
-plugins  = ["npm:@dprint/exec@0.7.3/plugin.json@704701df449dd7e942a71144773778ac529d68c2e4657bfc236d393b898b9a67"]
 
 [[exec.commands]]
 command = "rustfmt"
@@ -25,12 +24,10 @@ exts    = ["toml"]
 textWrap = "never"
 
 [typescript]
-"module.sortImportDeclarations"         = "maintain"
-"module.sortExportDeclarations"         = "maintain"
-"exportDeclaration.sortNamedExports"    = "maintain"
-"exportDeclaration.sortTypeOnlyExports" = "none"
-"importDeclaration.sortNamedImports"    = "maintain"
-"importDeclaration.sortTypeOnlyImports" = "none"
+"module.sortImportDeclarations"      = "maintain"
+"module.sortExportDeclarations"      = "maintain"
+"exportDeclaration.sortNamedExports" = "maintain"
+"importDeclaration.sortNamedImports" = "maintain"
 
 # TODO: follow-up on this crash at 445826ebabf469e54d00652aa789a7e5bc447cc5
 # on: kjanat/svg, kjanat/dprint-plugin-svg
