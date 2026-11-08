@@ -1,6 +1,6 @@
 //! Local numeric-literal extensions, enabled exclusively through dialect hooks.
 
-use super::{Location, State, Token, Tokenizer, TokenizerError, peeking_take_while};
+use super::{peeking_take_while, Location, State, Token, Tokenizer, TokenizerError};
 #[cfg(not(feature = "std"))]
 use alloc::{
     format,

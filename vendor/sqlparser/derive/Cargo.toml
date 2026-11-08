@@ -16,28 +16,29 @@
 # under the License.
 
 [package]
-name = "sqlparser_derive"
-description = "Procedural (proc) macros for sqlparser"
-version = "0.6.0"
-authors = ["sqlparser-rs authors"]
+name          = "sqlparser_derive"
+version       = "0.6.0"
+authors       = ["sqlparser-rs authors"]
+edition       = "2021"
+description   = "Procedural (proc) macros for sqlparser"
 documentation = "https://docs.rs/sqlparser_derive/"
-keywords = ["ansi", "sql", "lexer", "parser"]
-repository = "https://github.com/sqlparser-rs/sqlparser-rs"
-license = "Apache-2.0"
-include = [
-    "src/**/*.rs",
-    "Cargo.toml",
-    "LICENSE.TXT",
+repository    = "https://github.com/sqlparser-rs/sqlparser-rs"
+license       = "Apache-2.0"
+keywords      = ["ansi", "lexer", "parser", "sql"]
+include       = [
+  "src/**/*.rs",
+  "Cargo.toml",
+  "LICENSE.TXT",
 ]
-edition = "2021"
+publish       = false
 
 [lib]
 proc-macro = true
 
+[dependencies]
+proc-macro2 = "1.0"
+quote       = "1.0"
+syn         = { version = "3.0", default-features = false, features = ["clone-impls", "derive", "full", "parsing", "printing", "proc-macro"] }
+
 [lints.rust]
 unsafe_code = "forbid"
-
-[dependencies]
-syn = { version = "3.0", default-features = false, features = ["full", "printing", "parsing", "derive", "proc-macro", "clone-impls"] }
-proc-macro2 = "1.0"
-quote = "1.0"
