@@ -7,8 +7,8 @@
 toml-version = "v1.0.0"
 
 [files]
-include              = ["**/*.toml", "**/.*.toml"]
-exclude              = ["**/fixtures", "**/.cache/**/*.toml", "vendor/**/*.toml"]
+include              = ["**/*.toml", "**/.*.toml", "vendor/sqlparser/**/Cargo.toml"]
+exclude              = ["**/fixtures", "**/.cache/**/*.toml", "vendor/", "!vendor/sqlparser/**/Cargo.toml"]
 respect-ignore-files = true
 
 [format]

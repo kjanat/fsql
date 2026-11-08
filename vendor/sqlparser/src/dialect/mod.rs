@@ -506,10 +506,14 @@ pub trait Dialect: Debug + Any {
     }
 
     /// Whether numeric literals can carry filesystem byte-unit suffixes.
-    fn supports_byte_unit_suffixes(&self) -> bool { false }
+    fn supports_byte_unit_suffixes(&self) -> bool {
+        false
+    }
 
     /// Whether numeric literals can use the 0o or 0O octal prefix.
-    fn supports_octal_prefix(&self) -> bool { false }
+    fn supports_octal_prefix(&self) -> bool {
+        false
+    }
 
     /// Returns true if a period directly after an identifier starts a tuple
     /// element access such as `t.1`, instead of the number `.1`.

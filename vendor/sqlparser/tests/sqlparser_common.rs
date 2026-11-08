@@ -1219,9 +1219,7 @@ fn parse_column_aliases() {
     let sql = "SELECT a.col + 1 AS newname FROM foo AS a";
     let select = verified_only_select(sql);
     if let SelectItem::ExprWithAlias {
-        expr: Expr::BinaryOp {
-            op, right, ..
-        },
+        expr: Expr::BinaryOp { op, right, .. },
         alias,
     } = only(&select.projection)
     {
@@ -1608,18 +1606,7 @@ fn parse_escaped_single_quote_string_predicate_with_no_escape() {
 #[test]
 fn parse_number() {
     let expr = verified_expr("1.0");
-
-    #[cfg(feature = "bigdecimal")]
-    assert_eq!(
-        expr,
-        Expr::Value((Value::Number(bigdecimal::BigDecimal::from(1), false)).with_empty_span())
-    );
-
-    #[cfg(not(feature = "bigdecimal"))]
-    assert_eq!(
-        expr,
-        Expr::Value((Value::Number("1.0".into(), false)).with_empty_span())
-    );
+    assert_eq!(expr, Expr::Value(number("1.0").with_empty_span()));
 }
 
 #[test]
@@ -3633,23 +3620,10 @@ fn parse_floor_number_scale() {
 fn parse_ceil_scale() {
     let sql = "SELECT CEIL(d, 2)";
     let select = verified_only_select(sql);
-
-    #[cfg(feature = "bigdecimal")]
     assert_eq!(
         &Expr::Ceil {
             expr: Box::new(Expr::Identifier(Ident::new("d"))),
-            field: CeilFloorKind::Scale(
-                Value::Number(bigdecimal::BigDecimal::from(2), false).with_empty_span()
-            ),
-        },
-        expr_from_projection(only(&select.projection)),
-    );
-
-    #[cfg(not(feature = "bigdecimal"))]
-    assert_eq!(
-        &Expr::Ceil {
-            expr: Box::new(Expr::Identifier(Ident::new("d"))),
-            field: CeilFloorKind::Scale(Value::Number(2.to_string(), false).with_empty_span()),
+            field: CeilFloorKind::Scale(number("2").with_empty_span()),
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -3659,23 +3633,10 @@ fn parse_ceil_scale() {
 fn parse_floor_scale() {
     let sql = "SELECT FLOOR(d, 2)";
     let select = verified_only_select(sql);
-
-    #[cfg(feature = "bigdecimal")]
     assert_eq!(
         &Expr::Floor {
             expr: Box::new(Expr::Identifier(Ident::new("d"))),
-            field: CeilFloorKind::Scale(
-                Value::Number(bigdecimal::BigDecimal::from(2), false).with_empty_span()
-            ),
-        },
-        expr_from_projection(only(&select.projection)),
-    );
-
-    #[cfg(not(feature = "bigdecimal"))]
-    assert_eq!(
-        &Expr::Floor {
-            expr: Box::new(Expr::Identifier(Ident::new("d"))),
-            field: CeilFloorKind::Scale(Value::Number(2.to_string(), false).with_empty_span()),
+            field: CeilFloorKind::Scale(number("2").with_empty_span()),
         },
         expr_from_projection(only(&select.projection)),
     );

@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
-members  = ["crates/*", "editors/zed/"]
-exclude  = ["vendor"]
+members  = ["crates/*", "editors/zed/", "vendor/sqlparser"]
 
 [workspace.package]
 version    = "0.1.0"
@@ -10,8 +9,8 @@ repository = "https://github.com/kjanat/fsql"
 license    = "MIT"
 
 [workspace.dependencies]
-fsql      = { path = "crates/fsql", "version" = "0.1.0" }
-sqlparser = { path = "vendor/sqlparser" }
+fsql      = { path = "crates/fsql", version = "0.1.0" }
+sqlparser = { package = "fsql-sql", path = "vendor/sqlparser", version = "0.1.0" }
 
 clap        = { version = "4.6.6", features = ["derive"] }
 criterion   = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }

@@ -1480,11 +1480,18 @@ impl<'a> Tokenizer<'a> {
                     }
 
                     if self.dialect.supports_byte_unit_suffixes() {
-                        if let Some((suffix_len, multiplier)) = numeric_literals::peek_byte_unit_suffix(chars) {
-                            for _ in 0..suffix_len { chars.next(); }
+                        if let Some((suffix_len, multiplier)) =
+                            numeric_literals::peek_byte_unit_suffix(chars)
+                        {
+                            for _ in 0..suffix_len {
+                                chars.next();
+                            }
                             return match numeric_literals::scale_by_byte_unit(&s, multiplier) {
                                 Some(scaled) => Ok(Some(Token::Number(scaled, false))),
-                                None => self.tokenizer_error(literal_start, format!("Byte size literal out of range: {s}")),
+                                None => self.tokenizer_error(
+                                    literal_start,
+                                    format!("Byte size literal out of range: {s}"),
+                                ),
                             };
                         }
                     }
