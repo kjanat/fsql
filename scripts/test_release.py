@@ -145,7 +145,10 @@ class ReleasePlan(unittest.TestCase):
         crate(directory, "fsql-sqlparser", "0.1.0", "e" * 40, dirty=True)
         with self.assertRaises(release.ReleaseRejected):
             release.read_crate(
-                directory / "fsql-sqlparser-0.1.0.crate", "fsql-sqlparser", "0.1.0", "e" * 40
+                directory / "fsql-sqlparser-0.1.0.crate",
+                "fsql-sqlparser",
+                "0.1.0",
+                "e" * 40,
             )
 
     def test_report_requires_every_crate(self):
