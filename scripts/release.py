@@ -1,4 +1,4 @@
-"""Publish fsql-sql, fsql, and fsql-cli for one approved Beepboop commit."""
+"""Publish fsql-sqlparser, fsql, and fsql-cli for one approved Beepboop commit."""
 
 import hashlib
 import json
@@ -12,10 +12,10 @@ from pathlib import Path
 REPOSITORY = "kjanat/fsql"
 STREAMS = {
     "main": {
-        "crates": ("fsql-sql", "fsql"),
+        "crates": ("fsql-sqlparser", "fsql"),
         "tag": "v",
         "manifests": {
-            "fsql-sql": "vendor/sqlparser/Cargo.toml",
+            "fsql-sqlparser": "vendor/sqlparser/Cargo.toml",
             "fsql": "crates/fsql/Cargo.toml",
         },
     },

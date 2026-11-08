@@ -453,7 +453,7 @@ name = "fsql"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "fsql-sql",
+ "fsql-sqlparser",
  "globset",
  "ignore",
  "jwalk",
@@ -477,7 +477,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fsql-sql"
+name = "fsql-sqlparser"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",

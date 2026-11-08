@@ -5,12 +5,12 @@
 Upstream: [datafusion-sqlparser-rs]\
 Commit: [14cbf755b3f479a27f338c050217431279eb1f2e]\
 Upstream version: 0.63.0\
-Package: `fsql-sql`, versioned with the workspace\
+Package: `fsql-sqlparser`, versioned with the workspace\
 License: Apache-2.0 (see [`sqlparser/LICENSE.TXT`])
 
 ### Local patches
 
-`derive/Cargo.toml` sets `publish = false`. The root workspace follows that path dependency, and the published `fsql-sql` crate depends on crates.io `sqlparser_derive` 0.6.0.
+`derive/Cargo.toml` sets `publish = false`. The root workspace follows that path dependency, and the published `fsql-sqlparser` crate depends on crates.io `sqlparser_derive` 0.6.0.
 
 `src/dialect/mod.rs`
 
@@ -47,8 +47,8 @@ Source code, Cargo manifests, licensing files, tests and their SQL fixtures, exa
 1. Check out the upstream commit being vendored in a temporary clone and delete the clone's own `.git` directory.
 2. Remove every path listed under **Omitted upstream files** from that clone. Preserve licenses, notices, and symlinks, including `derive/LICENSE.TXT`.
 3. `diff -ru vendor/sqlparser <clone>` and re-apply the patches listed above.
-4. Replace the directory, then update the commit in this file. Keep the package name `fsql-sql` and `[lib] name = "sqlparser"`.
-5. `cargo test --lib tokenizer -p fsql-sql`
+4. Replace the directory, then update the commit in this file. Keep the package name `fsql-sqlparser` and `[lib] name = "sqlparser"`.
+5. `cargo test --lib tokenizer -p fsql-sqlparser`
 6. `cargo test --workspace`
 
 [datafusion-sqlparser-rs]: https://github.com/apache/datafusion-sqlparser-rs

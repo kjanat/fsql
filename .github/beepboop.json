@@ -4,7 +4,7 @@
 	"streams": {
 		"main": {
 			"versioning": "workspace",
-			"packages": ["cargo:fsql-sql", "cargo:fsql"],
+			"packages": ["cargo:fsql-sqlparser", "cargo:fsql"],
 			"promote": {
 				"approval": "push",
 				"workflow": {
@@ -12,7 +12,7 @@
 					"ref": "master",
 					"mode": "dispatch",
 					"publications": [
-						"cargo:fsql-sql",
+						"cargo:fsql-sqlparser",
 						"cargo:fsql",
 						"github-release:kjanat/fsql"
 					],
@@ -20,7 +20,7 @@
 				}
 			},
 			"credentials": ["crates-io"],
-			"required": ["cargo:fsql-sql", "cargo:fsql", "github-release:kjanat/fsql"]
+			"required": ["cargo:fsql-sqlparser", "cargo:fsql", "github-release:kjanat/fsql"]
 		},
 		"cli": {
 			"versioning": "workspace",

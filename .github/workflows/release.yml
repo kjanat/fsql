@@ -57,7 +57,7 @@ jobs:
         run: |
           stream=$(python3 -B -c 'import json, os; print(json.loads(os.environ["RELEASE_CONTEXT"])["stream"])')
           if [ "${stream}" = main ]; then
-            cargo package --locked -p fsql-sql
+            cargo package --locked -p fsql-sqlparser
           else
             cargo check --locked --offline -p fsql-cli
           fi

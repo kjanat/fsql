@@ -130,7 +130,7 @@ class ReleasePlan(unittest.TestCase):
         def fetch(url, token=None):
             return {
                 "version": {
-                    "crate": "fsql-sql",
+                    "crate": "fsql-sqlparser",
                     "num": "0.1.0",
                     "yanked": True,
                     "checksum": "ab",
@@ -138,14 +138,14 @@ class ReleasePlan(unittest.TestCase):
             }
 
         with self.assertRaises(release.ReleaseRejected):
-            release.pending_crates("0.1.0", ("fsql-sql",), fetch)
+            release.pending_crates("0.1.0", ("fsql-sqlparser",), fetch)
 
     def test_archive_rejects_a_dirty_tree(self):
         directory = self.directory
-        crate(directory, "fsql-sql", "0.1.0", "e" * 40, dirty=True)
+        crate(directory, "fsql-sqlparser", "0.1.0", "e" * 40, dirty=True)
         with self.assertRaises(release.ReleaseRejected):
             release.read_crate(
-                directory / "fsql-sql-0.1.0.crate", "fsql-sql", "0.1.0", "e" * 40
+                directory / "fsql-sqlparser-0.1.0.crate", "fsql-sqlparser", "0.1.0", "e" * 40
             )
 
     def test_report_requires_every_crate(self):
@@ -173,11 +173,11 @@ class ReleasePlan(unittest.TestCase):
     def test_report_rejects_a_different_checksum(self):
         sha = "d" * 40
         directory = self.directory
-        crate(directory, "fsql-sql", "0.1.0", sha)
+        crate(directory, "fsql-sqlparser", "0.1.0", sha)
 
         def fetch(url, token=None):
             name = url.rstrip("/").split("/")[-2]
-            if name != "fsql-sql":
+            if name != "fsql-sqlparser":
                 return None
             return {
                 "version": {
