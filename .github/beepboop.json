@@ -1,0 +1,42 @@
+{
+	"$schema": "https://beepboop.kjanat.dev/schema/v1.json",
+	"managers": ["cargo", "github-release", "workflow"],
+	"streams": {
+		"main": {
+			"versioning": "workspace",
+			"packages": ["cargo:fsql-sql", "cargo:fsql"],
+			"promote": {
+				"approval": "push",
+				"workflow": {
+					"file": "release.yml",
+					"ref": "master",
+					"mode": "dispatch",
+					"publications": [
+						"cargo:fsql-sql",
+						"cargo:fsql",
+						"github-release:kjanat/fsql"
+					],
+					"refs": { "phase": "version", "prefix": "v" }
+				}
+			},
+			"credentials": ["crates-io"],
+			"required": ["cargo:fsql-sql", "cargo:fsql", "github-release:kjanat/fsql"]
+		},
+		"cli": {
+			"versioning": "workspace",
+			"packages": ["cargo:fsql-cli"],
+			"promote": {
+				"approval": "push",
+				"workflow": {
+					"file": "release.yml",
+					"ref": "master",
+					"mode": "dispatch",
+					"publications": ["cargo:fsql-cli", "github-release:kjanat/fsql"],
+					"refs": { "phase": "version", "prefix": "cli-v" }
+				}
+			},
+			"credentials": ["crates-io"],
+			"required": ["cargo:fsql-cli", "github-release:kjanat/fsql"]
+		}
+	}
+}

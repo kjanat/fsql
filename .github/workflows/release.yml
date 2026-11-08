@@ -1,0 +1,183 @@
+name: Publish release
+run-name: ${{ inputs.beepboop_title || github.workflow }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      beepboop_execution_id:
+        description: Promotion execution approved in Beepboop
+        required: true
+        type: string
+      beepboop_title:
+        description: Run title sent by Beepboop
+        required: false
+        type: string
+
+permissions: { contents: read }
+defaults: { run: { shell: "bash -euo pipefail {0}" } }
+concurrency: { group: release-publish, cancel-in-progress: false }
+
+jobs:
+  authorize:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: { contents: read, actions: read, id-token: write }
+    outputs:
+      context: ${{ steps.release.outputs.context }}
+    steps:
+      - uses: kjanat/beepboop/actions/begin@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+        id: release
+        with:
+          execution-id: ${{ inputs.beepboop_execution_id }}
+          operation: promote
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.context).sourceSha }}
+          persist-credentials: false
+      - name: Require the approved version, signed commit, and successful CI
+        env:
+          RELEASE_CONTEXT: ${{ steps.release.outputs.context }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/release.py check
+
+  package:
+    needs: authorize
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ fromJSON(needs.authorize.outputs.context).sourceSha }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - name: Package the approved crates
+        env: { RELEASE_CONTEXT: "${{ needs.authorize.outputs.context }}" }
+        run: |
+          stream=$(python3 -B -c 'import json, os; print(json.loads(os.environ["RELEASE_CONTEXT"])["stream"])')
+          if [ "${stream}" = main ]; then
+            cargo package --locked -p fsql-sql
+          else
+            cargo check --locked --offline -p fsql-cli
+          fi
+
+  publish:
+    needs: [authorize, package]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions: { contents: read, actions: read, id-token: write, attestations: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ fromJSON(needs.authorize.outputs.context).sourceSha }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - id: pending
+        env: { RELEASE_CONTEXT: "${{ needs.authorize.outputs.context }}" }
+        run: |
+          pending=$(python3 -B scripts/release.py pending)
+          delimiter=$(uuidgen)
+          {
+            echo "list<<${delimiter}"
+            printf '%s\n' "${pending}"
+            echo "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
+      - uses: kjanat/beepboop/actions/credentials@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+        if: steps.pending.outputs.list != ''
+        id: credentials
+        with: { aliases: '["crates-io"]' }
+      - name: Export the registry token
+        if: steps.pending.outputs.list != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ fromJSON(steps.credentials.outputs.values)['crates-io'] }}
+        run: printf 'CARGO_REGISTRY_TOKEN=%s\n' "${CARGO_REGISTRY_TOKEN}" >> "${GITHUB_ENV}"
+      - name: Publish crates that are absent from the registry
+        env:
+          PENDING: ${{ steps.pending.outputs.list }}
+          RELEASE_CONTEXT: ${{ needs.authorize.outputs.context }}
+        run: |
+          package_crate() {
+            local crate="$1"
+            local output status
+            for _ in $(seq 1 30); do
+              set +e
+              output=$(cargo package --locked -p "${crate}" 2>&1)
+              status=$?
+              set -e
+              printf '%s\n' "${output}"
+              if [ "${status}" -eq 0 ]; then
+                return 0
+              fi
+              if [[ "${output}" != *"no matching package named"* ]]; then
+                return "${status}"
+              fi
+              sleep 10
+            done
+            return 1
+          }
+          while IFS= read -r crate; do
+            [ -z "${crate}" ] && continue
+            package_crate "${crate}"
+            publish=0
+            while IFS= read -r name; do
+              if [ "${name}" = "${crate}" ]; then
+                publish=1
+              fi
+            done <<< "${PENDING}"
+            if [ "${publish}" -eq 1 ]; then
+              cargo publish --locked --no-verify -p "${crate}"
+            fi
+          done < <(python3 -B scripts/release.py crates)
+      - name: Verify the registry checksums
+        id: report
+        env: { RELEASE_CONTEXT: "${{ needs.authorize.outputs.context }}" }
+        run: |
+          status=1
+          for _ in $(seq 1 30); do
+            set +e
+            python3 -B scripts/release.py report
+            status=$?
+            set -e
+            if [ "${status}" -eq 0 ]; then
+              exit 0
+            fi
+            if [ "${status}" -ne 2 ]; then
+              exit "${status}"
+            fi
+            sleep 10
+          done
+          exit "${status}"
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with: { subject-path: "target/package/*.crate" }
+      - uses: kjanat/beepboop/actions/report@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+        with: { publications: "${{ steps.report.outputs.publications }}" }
+      - uses: kjanat/beepboop/actions/token@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+        id: beepboop
+        with:
+          execution-id: ${{ inputs.beepboop_execution_id }}
+          permissions: '{"contents":"write"}'
+      - name: Attach the crates to the draft release
+        env:
+          GH_TOKEN: ${{ steps.beepboop.outputs.token }}
+          RELEASE_ID: ${{ fromJSON(needs.authorize.outputs.context).draftRelease.id }}
+          VERSION: ${{ fromJSON(needs.authorize.outputs.context).version }}
+          RELEASE_CONTEXT: ${{ needs.authorize.outputs.context }}
+        run: |
+          while IFS= read -r crate; do
+            [ -z "${crate}" ] && continue
+            asset="${crate}-${VERSION}.crate"
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" --jq ".[] | select(.name == \"${asset}\") | .id")
+            if [ -n "${existing}" ]; then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${existing}"
+            fi
+            gh api --method POST --header "Content-Type: application/octet-stream" --input "target/package/${asset}" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${asset}"
+          done < <(python3 -B scripts/release.py crates)
+      - uses: kjanat/beepboop/actions/publish-refs@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1
+        env:
+          GIT_COMMITTER_NAME: ${{ steps.beepboop.outputs.bot-login }}
+          GIT_COMMITTER_EMAIL: ${{ steps.beepboop.outputs.bot-email }}
+        with: { token: "${{ steps.beepboop.outputs.token }}" }
+      - uses: kjanat/beepboop/actions/publish-release@45d5e5b84a319bc066cc3239ee1c6d79e737ec3c # v1

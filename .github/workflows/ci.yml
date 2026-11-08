@@ -27,6 +27,8 @@ jobs:
             name: Install tools from .tool-versions
             uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
             with: { install: true }
+      - name: Release publication plan
+        run: python3 -B scripts/test_release.py
       - name: Test
         run: run test:workspace
       - name: Build Zed WASM adapter
