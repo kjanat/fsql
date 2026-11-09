@@ -722,7 +722,7 @@ fn clean_stage(stage: &Path, identity: Option<Identity>, op: Option<&Operation>)
     if found.kind != "dir" || identity.is_some_and(|i| !found.identity.matches(&i, Kind::Dir)) {
         return Err(Error::Stale(stage.to_owned()));
     }
-    let _pinned = open_chain(stage)?;
+    let pinned = open_chain(stage)?;
     let entries = match fs::read_dir(stage) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -754,6 +754,7 @@ fn clean_stage(stage: &Path, identity: Option<Identity>, op: Option<&Operation>)
         journal::sync_dir(stage)?;
         checkpoint("stage-object-removed");
     }
+    drop(pinned);
     fs::remove_dir(stage).map_err(|e| std_io(stage, e))?;
     checkpoint("stage-removed");
     journal::sync_dir(stage.parent().expect("stage parent"))

@@ -15,8 +15,8 @@ use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE,
 };
 
 use super::Stat;
@@ -32,6 +32,8 @@ pub const HIDDEN_ATTRIBUTE: bool = true;
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
+const SHARE_UNMOVABLE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+
 const NO_FOLLOW: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
 
 const NANOS_PER_TICK: i64 = 100;
@@ -40,7 +42,7 @@ const UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 
 pub struct Dir {
     path: PathBuf,
-    _handle: File,
+    _chain: Vec<File>,
 }
 
 pub struct Name(OsString);
@@ -158,7 +160,7 @@ pub fn root(path: &Path) -> &Path {
     path.ancestors().last().unwrap_or(path)
 }
 
-fn open_handle(path: &Path, access: u32, follow: bool) -> io::Result<File> {
+fn open_shared(path: &Path, access: u32, share: u32, follow: bool) -> io::Result<File> {
     let flags = if follow {
         FILE_FLAG_BACKUP_SEMANTICS
     } else {
@@ -166,14 +168,24 @@ fn open_handle(path: &Path, access: u32, follow: bool) -> io::Result<File> {
     };
     OpenOptions::new()
         .access_mode(access)
-        .share_mode(SHARE_ALL)
+        .share_mode(share)
         .custom_flags(flags)
         .open(path)
 }
 
+fn open_handle(path: &Path, access: u32, follow: bool) -> io::Result<File> {
+    open_shared(path, access, SHARE_ALL, follow)
+}
+
 fn open_directory(path: &Path) -> Result<File> {
-    let handle = open_handle(path, FILE_READ_ATTRIBUTES | SYNCHRONIZE, false)
-        .map_err(|e| super::io(path, e))?;
+    // NTFS ignores the share mode of attribute-only opens.
+    let handle = open_shared(
+        path,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        SHARE_UNMOVABLE,
+        false,
+    )
+    .map_err(|e| super::io(path, e))?;
     let attributes = handle
         .metadata()
         .map_err(|e| super::io(path, e))?
@@ -193,24 +205,23 @@ fn open_directory(path: &Path) -> Result<File> {
 pub fn open_chain(directory: &Path) -> Result<Dir> {
     crate::walk::validate_path(directory)?;
     let mut opened = PathBuf::new();
-    let mut handle = None;
+    let mut chain = Vec::new();
     for component in directory.components() {
         match component {
             Component::Prefix(_) | Component::RootDir => opened.push(component),
             Component::Normal(part) => {
                 opened.push(part);
-                handle = Some(open_directory(&opened)?);
+                chain.push(open_directory(&opened)?);
             }
             Component::CurDir | Component::ParentDir => {}
         }
     }
-    let handle = match handle {
-        Some(handle) => handle,
-        None => open_directory(&opened)?,
-    };
+    if chain.is_empty() {
+        chain.push(open_directory(&opened)?);
+    }
     Ok(Dir {
         path: opened,
-        _handle: handle,
+        _chain: chain,
     })
 }
 
@@ -705,6 +716,19 @@ mod tests {
         assert!(stat.ino != 0);
         assert!(Accounts::default().user(&file, &stat).is_some());
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn validated_directories_stay_in_place_while_held() {
+        let root = std::env::temp_dir().join(format!("fsql-windows-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("outer").join("inner")).expect("dirs");
+        let held = open_chain(&root.join("outer").join("inner")).expect("chain");
+        assert!(std::fs::rename(root.join("outer"), root.join("moved")).is_err());
+        assert!(std::fs::rename(root.join("outer").join("inner"), root.join("moved")).is_err());
+        drop(held);
+        std::fs::rename(root.join("outer"), root.join("moved")).expect("rename");
+        std::fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]
