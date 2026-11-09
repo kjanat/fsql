@@ -10,7 +10,11 @@ use std::time::{Duration, SystemTime};
 
 use fs_at::os::windows::FileExt;
 use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};
-use windows_permissions::wrappers::{GetSecurityInfo, LookupAccountSid};
+use windows_permissions::utilities::current_process_sid;
+use windows_permissions::wrappers::{
+    ConvertStringSecurityDescriptorToSecurityDescriptor, GetSecurityInfo, LookupAccountSid,
+    SetNamedSecurityInfo,
+};
 use windows_permissions::{LocalBox, SecurityDescriptor, Sid};
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -513,8 +517,19 @@ pub fn sync_entry(dir: &Dir, name: &Name) -> io::Result<()> {
     sync_dir(dir)
 }
 
-pub fn set_private(_path: &Path) -> io::Result<()> {
-    Ok(())
+pub fn set_private(path: &Path) -> io::Result<()> {
+    let user = current_process_sid()?;
+    let descriptor =
+        ConvertStringSecurityDescriptorToSecurityDescriptor(&format!("D:P(A;OICI;FA;;;{user})"))?;
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        descriptor.dacl(),
+        None,
+    )
 }
 
 pub fn copy_attributes(from: &File, from_path: &Path, to: &File) -> Result<()> {
@@ -775,6 +790,34 @@ mod tests {
             assert_eq!(source.to_string(), "refusing to follow a link", "{refused}");
         }
         std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn private_directories_admit_only_the_current_user() {
+        let dir = std::env::temp_dir().join(format!("fsql-windows-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        set_private(&dir).expect("private");
+        std::fs::write(dir.join("tomb"), b"secret").expect("file");
+        let user = current_process_sid().expect("user").to_string();
+        for path in [dir.clone(), dir.join("tomb")] {
+            let descriptor = security(&path, SecurityInformation::Dacl).expect("dacl");
+            let dacl = descriptor.dacl().expect("present");
+            let aces: Vec<_> = (0..dacl.len())
+                .filter_map(|index| dacl.get_ace(index))
+                .map(|ace| (ace_tag(ace.ace_type()), ace.sid().map(ToString::to_string)))
+                .collect();
+            assert_eq!(aces, [("allow", Some(user.clone()))], "{}", path.display());
+        }
+        assert!(
+            security(&dir, SecurityInformation::Dacl)
+                .expect("dacl")
+                .as_sddl()
+                .expect("sddl")
+                .to_string_lossy()
+                .starts_with("D:P")
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
