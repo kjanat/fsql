@@ -128,7 +128,7 @@ fn permission_reports_filter_execute_write_and_modification_time() {
     const EXECUTABLES: &str = include_str!("../../../examples/largest-executables.fsql");
     const WRITABLE: &str = include_str!("../../../examples/world-writable-recent.fsql");
     let fixture = tempfile::tempdir().unwrap();
-    let root = fixture.path();
+    let root = &fs::canonicalize(fixture.path()).unwrap();
     for (name, mode) in [
         ("execute", 0o755),
         ("writable", 0o666),
