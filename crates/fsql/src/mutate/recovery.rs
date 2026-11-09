@@ -419,7 +419,7 @@ fn stage_dir(journal: &Journal, seq: u64, parent: &Path) -> Result<PathBuf> {
     checkpoint("prepare-recorded");
     let dir = open_chain(parent)?;
     let name = sys::name_of(stage.file_name().expect("stage name"), &stage)?;
-    sys::mkdir(&dir, &name, 0o700).map_err(|e| io(&stage, e))?;
+    sys::private_dir(&dir, &name).map_err(|e| io(&stage, e))?;
     journal::sync_dir(parent)?;
     checkpoint("stage-created");
     save(

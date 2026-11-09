@@ -517,6 +517,11 @@ pub fn sync_entry(dir: &Dir, name: &Name) -> io::Result<()> {
     sync_dir(dir)
 }
 
+pub fn private_dir(dir: &Dir, name: &Name) -> io::Result<()> {
+    std::fs::create_dir(child(dir, name))?;
+    set_private(&child(dir, name))
+}
+
 pub fn set_private(path: &Path) -> io::Result<()> {
     let user = current_process_sid()?;
     let descriptor =
@@ -794,13 +799,18 @@ mod tests {
 
     #[test]
     fn private_directories_admit_only_the_current_user() {
-        let dir = std::env::temp_dir().join(format!("fsql-windows-private-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let root =
+            std::env::temp_dir().join(format!("fsql-windows-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("journal");
         std::fs::create_dir_all(&dir).expect("dir");
         set_private(&dir).expect("private");
         std::fs::write(dir.join("tomb"), b"secret").expect("file");
+        let chain = open_chain(&root).expect("chain");
+        private_dir(&chain, &Name::new(OsStr::new("stage")).expect("name")).expect("stage");
+        drop(chain);
         let user = current_process_sid().expect("user").to_string();
-        for path in [dir.clone(), dir.join("tomb")] {
+        for path in [dir.clone(), dir.join("tomb"), root.join("stage")] {
             let descriptor = security(&path, SecurityInformation::Dacl).expect("dacl");
             let dacl = descriptor.dacl().expect("present");
             let aces: Vec<_> = (0..dacl.len())
@@ -817,7 +827,7 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("D:P")
         );
-        std::fs::remove_dir_all(&dir).expect("cleanup");
+        std::fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]
