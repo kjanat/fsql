@@ -969,12 +969,21 @@ fn hint(term: &Expr) -> Option<Hint> {
             negated: false,
             expr,
             pattern,
-            escape_char: None,
+            escape_char,
             ..
         } if is_column(expr, Column::Path) => {
-            let pattern = string_literal(pattern)?;
-            let end = pattern.find(['%', '_']).unwrap_or(pattern.len());
-            Some(Hint::Prefix(pattern[..end].to_owned()))
+            let escape = match escape_char.as_deref() {
+                None => None,
+                Some(text) => {
+                    let mut chars = string_literal(text)?.chars();
+                    let escape = chars.next()?;
+                    if chars.next().is_some() {
+                        return None;
+                    }
+                    Some(escape)
+                }
+            };
+            Some(Hint::Prefix(like_prefix(string_literal(pattern)?, escape)))
         }
         Expr::BinaryOp { left, op, right } => match op {
             BinaryOperator::Glob if is_column(left, Column::Path) => {
@@ -1031,6 +1040,24 @@ fn hint(term: &Expr) -> Option<Hint> {
         Expr::Nested(inner) => hint(inner),
         _ => None,
     }
+}
+
+fn like_prefix(pattern: &str, escape: Option<char>) -> String {
+    let mut prefix = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if Some(c) == escape {
+            match chars.next() {
+                Some(literal) => prefix.push(literal),
+                None => break,
+            }
+        } else if matches!(c, '%' | '_') {
+            break;
+        } else {
+            prefix.push(c);
+        }
+    }
+    prefix
 }
 
 fn hint_directory(hint: &Hint) -> Option<PathBuf> {
@@ -1311,9 +1338,23 @@ mod tests {
     fn path_prefixes_narrow_the_walk_root() {
         let dir = fixture("narrow");
         let display = dir.display();
+        let literal: String = display
+            .to_string()
+            .chars()
+            .flat_map(|c| match c {
+                '%' | '_' | '!' => vec!['!', c],
+                other => vec![other],
+            })
+            .collect();
         let cases = [
-            (format!("path like '{display}/a/b/%'"), Some(("a/b", 2))),
-            (format!("path like '{display}/a/b%'"), Some(("a", 1))),
+            (
+                format!("path like '{literal}/a/b/%' escape '!'"),
+                Some(("a/b", 2)),
+            ),
+            (
+                format!("path like '{literal}/a/b%' escape '!'"),
+                Some(("a", 1)),
+            ),
             (
                 format!("path glob '{display}/a/**/*.rs' and size > 1"),
                 Some(("a", 1)),
@@ -1324,9 +1365,12 @@ mod tests {
             ),
             (format!("path = '{display}/a/b/c/file'"), Some(("a/b/c", 3))),
             (format!("parent = '{display}/a'"), Some(("a", 1))),
-            (format!("path like '{display}/%'"), None),
-            (format!("path like '{display}/a/%' or ext = 'x'"), None),
-            (format!("path not like '{display}/a/%'"), None),
+            (format!("path like '{literal}/%' escape '!'"), None),
+            (
+                format!("path like '{literal}/a/%' escape '!' or ext = 'x'"),
+                None,
+            ),
+            (format!("path not like '{literal}/a/%' escape '!'"), None),
             ("path like '/nonexistent/%'".to_owned(), None),
             ("ext = 'tmp'".to_owned(), None),
         ];
