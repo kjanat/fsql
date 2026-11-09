@@ -1,0 +1,25 @@
+name: Start release
+on:
+  workflow_dispatch:
+    inputs:
+      stream:
+        description: Release stream
+        type: choice
+        options:
+          - main
+        default: main
+      version:
+        description: patch, minor, major or a semantic version
+        required: true
+        default: patch
+permissions: {}
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: kjanat/beepboop/actions/release@v1
+        with:
+          stream: ${{ inputs.stream }}
+          version: ${{ inputs.version }}

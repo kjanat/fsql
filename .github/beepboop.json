@@ -2,17 +2,9 @@
   "$schema": "https://beepboop.kjanat.dev/schema/v1.json",
   "streams": {
     "main": {
-      "packages": [
-        "pkg:cargo/fsql",
-        "pkg:cargo/fsql-cli",
-        "pkg:cargo/fsql-sqlparser"
-      ],
+      "packages": ["pkg:cargo/fsql", "pkg:cargo/fsql-sqlparser"],
       "versioning": "workspace",
-      "required": [
-        "pkg:cargo/fsql-cli",
-        "pkg:cargo/fsql",
-        "pkg:cargo/fsql-sqlparser"
-      ],
+      "required": ["pkg:cargo/fsql", "pkg:cargo/fsql-sqlparser"],
       "credentials": ["crates-io"],
       "prepare": {
         "strategy": "managed",
@@ -21,16 +13,19 @@
           "ref": "master",
           "inputs": {
             "beepboop_operation": "prepare"
+          },
+          "setup": {
+            "job": "prepare"
           }
-        }
+        },
+        "bump": "pr"
       },
       "promote": {
-        "approval": "push",
+        "approval": "merge",
         "workflow": {
           "file": "release-fsql.yml",
           "ref": "master",
           "publications": [
-            "pkg:cargo/fsql-cli",
             "pkg:cargo/fsql",
             "pkg:cargo/fsql-sqlparser",
             "github-release:kjanat/fsql"
@@ -41,9 +36,42 @@
           },
           "inputs": {
             "beepboop_operation": "publish"
+          },
+          "setup": {
+            "job": "publish",
+            "binaries": {
+              "builds": [
+                {
+                  "toolchain": "cargo",
+                  "name": "fsql",
+                  "manifest": "crates/fsql-cli/Cargo.toml",
+                  "asset": "{name}-{rust.target}{ext}"
+                }
+              ],
+              "targets": [
+                "linux-amd64",
+                "linux-arm64",
+                "darwin-amd64",
+                "darwin-arm64",
+                "windows-amd64",
+                "windows-arm64"
+              ]
+            }
           }
         }
-      }
+      },
+      "start": [
+        {
+          "via": "action",
+          "workflow": "start-release.yml"
+        },
+        {
+          "via": "dashboard"
+        },
+        {
+          "via": "cli"
+        }
+      ]
     }
   },
   "managers": ["cargo", "github-release", "workflow"]

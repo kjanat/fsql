@@ -19,6 +19,97 @@ on:
         default: publish
         required: true
 jobs:
+  begin:
+    name: Begin release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      sourceSha: ${{ fromJSON(steps.beepboop.outputs.context).sourceSha }}
+      version: ${{ fromJSON(steps.beepboop.outputs.context).version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: kjanat/beepboop/actions/begin@v1
+        id: beepboop
+        with:
+          execution-id: ${{ inputs.beepboop_execution_id }}
+          stream: main
+          operation: promote
+    if: ${{ inputs.beepboop_operation == 'publish' }}
+  build-fsql:
+    name: Build fsql (${{ matrix.target }})
+    needs:
+      - begin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+            asset: fsql-x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+            asset: fsql-aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            ext: ""
+            asset: fsql-x86_64-apple-darwin
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+            asset: fsql-aarch64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+            asset: fsql-x86_64-pc-windows-msvc.exe
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            ext: .exe
+            asset: fsql-aarch64-pc-windows-msvc.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.begin.outputs.sourceSha }}
+          persist-credentials: false
+      - id: asset
+        name: Name the release asset
+        shell: bash
+        env:
+          VERSION: ${{ needs.begin.outputs.version }}
+          TEMPLATE: ${{ matrix.asset }}
+        run: |
+          mkdir -p dist
+          echo "name=${TEMPLATE//\{version\}/${VERSION}}" >> "${GITHUB_OUTPUT}"
+      - name: Build fsql
+        shell: bash
+        env:
+          MANIFEST: crates/fsql-cli/Cargo.toml
+          BINARY: fsql
+          TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+          VERSION: ${{ needs.begin.outputs.version }}
+          ASSET: ${{ steps.asset.outputs.name }}
+        run: |
+          rustup target add "${TARGET}"
+          cargo build --manifest-path "${MANIFEST}" --release --locked --bin "${BINARY}" --target "${TARGET}"
+          target="$(cargo metadata --manifest-path "${MANIFEST}" --format-version 1 --no-deps | jq -r .target_directory)"
+          cp "${target}/${TARGET}/release/${BINARY}${EXT}" "dist/${ASSET}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.asset.outputs.name }}
+          path: dist/${{ steps.asset.outputs.name }}
+          if-no-files-found: error
+    if: ${{ inputs.beepboop_operation == 'publish' }}
   prepare:
     runs-on: ubuntu-latest
     steps:
@@ -75,6 +166,39 @@ jobs:
         with:
           execution-id: ${{ steps.beepboop.outputs.execution-id }}
           credentials: '{"CARGO_REGISTRY_TOKEN":"crates-io"}'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write checksums
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum -- * > checksums.txt
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: dist
+          format: spdx-json
+          output-file: dist/${{ github.event.repository.name }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
+          sbom-path: dist/${{ github.event.repository.name }}.spdx.json
+      - id: beepboop_binaries
+        name: Upload binaries to the draft release
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ fromJSON(steps.beepboop.outputs.context).draftRelease.tag }}
+        run: |
+          gh release upload "${TAG}" -- *
       - id: beepboop_token
         uses: kjanat/beepboop/actions/token@v1
         with:
@@ -90,8 +214,11 @@ jobs:
         with:
           execution-id: ${{ steps.beepboop.outputs.execution-id }}
     permissions:
-      contents: read
+      contents: write
       id-token: write
+      attestations: write
     timeout-minutes: 210
+    needs:
+      - build-fsql
     if: ${{ inputs.beepboop_operation == 'publish' }}
 run-name: ${{ inputs.beepboop_title || github.workflow }}
