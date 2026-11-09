@@ -355,7 +355,7 @@ fn change(evaluator: &mut Evaluator, set: &Set, row: &dyn Row, frozen: &Frozen) 
         Column::Atime => Change::Atime(nanos(&value, "atime")?),
         Column::Mtime => Change::Mtime(nanos(&value, "mtime")?),
         Column::Path => {
-            let path = path_from_bytes(&bytes(&value, "path")?);
+            let path = sys::native_path_bytes(&bytes(&value, "path")?);
             if !path.is_absolute() {
                 return Err(Error::Plan(format!(
                     "new path `{}` must be absolute",
@@ -376,7 +376,7 @@ fn change(evaluator: &mut Evaluator, set: &Set, row: &dyn Row, frozen: &Frozen) 
             Change::Rename(frozen.parent.join(name))
         }
         Column::Parent => {
-            let parent = path_from_bytes(&bytes(&value, "parent")?);
+            let parent = sys::native_path_bytes(&bytes(&value, "parent")?);
             if !parent.is_absolute() {
                 return Err(Error::Plan(format!(
                     "new parent `{}` must be absolute",
@@ -464,7 +464,7 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
         }
         match column {
             InsertColumn::Column(Column::Path) => {
-                entry.path = path_from_bytes(&bytes(value, "path")?);
+                entry.path = sys::native_path_bytes(&bytes(value, "path")?);
             }
             InsertColumn::Column(Column::Kind) => {
                 kind_given = true;
@@ -488,7 +488,7 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
             InsertColumn::Column(Column::Atime) => entry.atime = Some(nanos(value, "atime")?),
             InsertColumn::Column(Column::Mtime) => entry.mtime = Some(nanos(value, "mtime")?),
             InsertColumn::Source => {
-                entry.source = Some(path_from_bytes(&bytes(value, "source")?));
+                entry.source = Some(sys::native_path_bytes(&bytes(value, "source")?));
             }
             InsertColumn::Content => entry.content = Some(bytes(value, "content")?),
             InsertColumn::Column(other) => {

@@ -43,8 +43,14 @@ impl Name {
     }
 }
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_os = "linux")]
 pub struct Pinned(OwnedFd);
+
+#[cfg(target_vendor = "apple")]
+pub enum Pinned {
+    Descriptor(OwnedFd),
+    Name { dir: OwnedFd, name: CString },
+}
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 pub struct Pinned {
@@ -68,6 +74,10 @@ pub fn applied_mode(_current: u32, requested: u32) -> u32 {
 
 pub fn native_path(text: &str) -> PathBuf {
     PathBuf::from(text)
+}
+
+pub fn native_path_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(os_from_bytes(bytes))
 }
 
 pub fn os_bytes(text: &OsStr) -> Vec<u8> {
@@ -303,31 +313,54 @@ pub fn pin(dir: &Dir, name: &Name) -> io::Result<Pinned> {
 #[cfg(target_vendor = "apple")]
 pub fn pin(dir: &Dir, name: &Name) -> io::Result<Pinned> {
     let event_only = OFlags::from_bits_retain(libc::O_EVTONLY.cast_unsigned());
-    Ok(Pinned(rustix::fs::openat(
+    match rustix::fs::openat(
         &dir.0,
         &name.0,
         event_only | OFlags::SYMLINK | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
-    )?))
+    ) {
+        Ok(fd) => Ok(Pinned::Descriptor(fd)),
+        Err(rustix::io::Errno::ACCESS) => {
+            stat::at(&dir.0, &name.0, false)?;
+            Ok(Pinned::Name {
+                dir: rustix::io::fcntl_dupfd_cloexec(&dir.0, 0)?,
+                name: name.0.clone(),
+            })
+        }
+        Err(errno) => Err(errno.into()),
+    }
 }
 
 #[cfg(target_vendor = "apple")]
 pub fn stat_pinned(pinned: &Pinned) -> io::Result<Stat> {
-    Ok(stat::fd(&pinned.0)?)
+    Ok(match pinned {
+        Pinned::Descriptor(fd) => stat::fd(fd)?,
+        Pinned::Name { dir, name } => stat::at(dir, name, false)?,
+    })
 }
 
 #[cfg(target_vendor = "apple")]
 pub fn set_mode(pinned: &Pinned, mode: u32) -> io::Result<()> {
-    Ok(rustix::fs::fchmod(&pinned.0, raw_mode(mode))?)
+    let result = match pinned {
+        Pinned::Descriptor(fd) => rustix::fs::fchmod(fd, raw_mode(mode)),
+        Pinned::Name { dir, name } => {
+            rustix::fs::chmodat(dir, name, raw_mode(mode), AtFlags::SYMLINK_NOFOLLOW)
+        }
+    };
+    Ok(result?)
 }
 
 #[cfg(target_vendor = "apple")]
 pub fn set_owner(pinned: &Pinned, owner: &super::Owner) -> io::Result<()> {
-    Ok(rustix::fs::fchown(
-        &pinned.0,
-        owner.uid.map(Uid::from_raw),
-        owner.gid.map(Gid::from_raw),
-    )?)
+    let uid = owner.uid.map(Uid::from_raw);
+    let gid = owner.gid.map(Gid::from_raw);
+    let result = match pinned {
+        Pinned::Descriptor(fd) => rustix::fs::fchown(fd, uid, gid),
+        Pinned::Name { dir, name } => {
+            rustix::fs::chownat(dir, name, uid, gid, AtFlags::SYMLINK_NOFOLLOW)
+        }
+    };
+    Ok(result?)
 }
 
 #[cfg(target_vendor = "apple")]
@@ -336,12 +369,25 @@ pub fn set_times(pinned: &Pinned, atime: Option<i64>, mtime: Option<i64>) -> io:
         last_access: timespec(atime),
         last_modification: timespec(mtime),
     };
-    Ok(rustix::fs::futimens(&pinned.0, &times)?)
+    let result = match pinned {
+        Pinned::Descriptor(fd) => rustix::fs::futimens(fd, &times),
+        Pinned::Name { dir, name } => {
+            rustix::fs::utimensat(dir, name, &times, AtFlags::SYMLINK_NOFOLLOW)
+        }
+    };
+    Ok(result?)
 }
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_os = "linux")]
 pub fn pin_file(file: &File, _dir: &Dir, _name: &Name) -> io::Result<Pinned> {
     Ok(Pinned(rustix::io::fcntl_dupfd_cloexec(file, 0)?))
+}
+
+#[cfg(target_vendor = "apple")]
+pub fn pin_file(file: &File, _dir: &Dir, _name: &Name) -> io::Result<Pinned> {
+    Ok(Pinned::Descriptor(rustix::io::fcntl_dupfd_cloexec(
+        file, 0,
+    )?))
 }
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]

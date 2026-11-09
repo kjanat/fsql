@@ -38,11 +38,13 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "fsql-contract-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "fsql-contract-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         fs::create_dir(&dir).unwrap();
         Self(dir)
     }

@@ -77,6 +77,14 @@ pub fn native_path(text: &str) -> PathBuf {
     PathBuf::from(text.replace('/', "\\"))
 }
 
+pub fn native_path_bytes(bytes: &[u8]) -> PathBuf {
+    let native: Vec<u8> = bytes
+        .iter()
+        .map(|byte| if *byte == b'/' { b'\\' } else { *byte })
+        .collect();
+    PathBuf::from(os_from_bytes(&native))
+}
+
 pub fn os_bytes(text: &OsStr) -> Vec<u8> {
     text.as_encoded_bytes().to_vec()
 }
@@ -649,6 +657,14 @@ mod tests {
         assert_eq!(
             os_from_bytes(b"bytes-\xff"),
             OsString::from("bytes-\u{FFFD}")
+        );
+    }
+
+    #[test]
+    fn sql_paths_take_native_separators() {
+        assert_eq!(
+            native_path_bytes(br"\\?\C:\tree/.fsql-abc-def-0"),
+            PathBuf::from(r"\\?\C:\tree\.fsql-abc-def-0")
         );
     }
 
