@@ -775,7 +775,13 @@ fn set_owner(pinned: &Pinned, path: &Path, uid: Option<u32>, gid: Option<u32>) -
     sys::set_owner(pinned, &Owner { uid, gid }).map_err(|e| io(path, e))
 }
 
-fn set_target(dir: &Dir, name: &Name, path: &Path, target: &[u8]) -> Result<Pinned> {
+fn set_target(
+    dir: &Dir,
+    name: &Name,
+    path: &Path,
+    target: &[u8],
+    destination: &Path,
+) -> Result<Pinned> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let temporary = format!(
@@ -784,7 +790,7 @@ fn set_target(dir: &Dir, name: &Name, path: &Path, target: &[u8]) -> Result<Pinn
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
     let temporary = sys::name_of(OsStr::new(&temporary), path)?;
-    sys::symlink(target, dir, &temporary, home(path)).map_err(|e| io(path, e))?;
+    sys::symlink(target, dir, &temporary, home(destination)).map_err(|e| io(path, e))?;
     let result = (|| {
         let pinned = pin(dir, &temporary, path)?;
         sys::rename_replace(dir, &temporary, dir, name).map_err(|e| io(path, e))?;
@@ -836,6 +842,10 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                 Change::Target(v) => intended.target = Some(v.clone()),
             }
         }
+        let destination = intended
+            .path
+            .as_deref()
+            .map_or_else(|| frozen.path.clone(), path_from_bytes);
         let mut after = Attrs::default();
         let mut identity = None;
         let mut begun = false;
@@ -893,7 +903,7 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                         replacement = Some(relocate(&pinned, &dirfd, &name, &path)?);
                     }
                     Change::Target(target) => {
-                        replacement = Some(set_target(&dirfd, &name, &path, target)?);
+                        replacement = Some(set_target(&dirfd, &name, &path, target, &destination)?);
                         after.target = Some(target.clone());
                     }
                 }
@@ -1179,7 +1189,7 @@ fn restore_update(
     if after.target.is_some()
         && let Some(target) = &before.target
     {
-        pinned = set_target(&dirfd, &name, original, target)?;
+        pinned = set_target(&dirfd, &name, original, target, original)?;
     }
     if after.mode.is_some()
         && let Some(mode) = before.mode
@@ -1783,6 +1793,19 @@ mod tests {
             std::fs::read_link(fx.at("src/link")).expect("link"),
             PathBuf::from(up(&["build", "nested"]))
         );
+        let (outcome, _) = fx.run(&format!(
+            "update files set target = 'nested', path = '{}' where name = 'link'",
+            fx.at("build/moved").display()
+        ));
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(directory_link(&fx.at("build/moved")));
+        let resolved = fx.resolve(&format!(
+            "update files set target = 'build', path = '{}' where name = 'moved'",
+            fx.at("rootlink").display()
+        ));
+        let outcome = apply(&resolved, None).expect("apply");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(directory_link(&fx.at("rootlink")));
     }
 
     #[cfg(unix)]

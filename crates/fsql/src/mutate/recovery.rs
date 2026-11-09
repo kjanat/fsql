@@ -539,7 +539,8 @@ fn build(
             }
             if let Some(link) = &attrs.target {
                 let new = stage.join("new");
-                sys::symlink_from(link, &new, home(p)).map_err(|e| std_io(&new, e))?;
+                let destination = attrs.path.as_deref().map_or_else(|| p.to_path_buf(), path);
+                sys::symlink_from(link, &new, home(&destination)).map_err(|e| std_io(&new, e))?;
                 journal::sync_dir(stage)?;
                 let prepared = Snapshot::required(&new)?;
                 steps.push(Step::Move {
