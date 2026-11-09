@@ -62,6 +62,8 @@ fsql undo 18d32e8f3c07b302-129aef
 cargo install fsql
 ```
 
+`cargo install --git https://github.com/kjanat/fsql fsql` installs the latest commit on `master`.
+
 ## Input
 
 ```sh
