@@ -1686,6 +1686,23 @@ mod tests {
     }
 
     #[test]
+    fn timestamps_finer_than_the_filesystem_clock_apply_and_undo() {
+        let fx = Fixture::new("fine-times");
+        let original = stat(&fx.at("src/keep.rs")).mtime;
+        let (outcome, id) = fx.run(
+            "update files set mtime = '2020-01-02T03:04:05.000000123Z' where name = 'keep.rs'",
+        );
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert_eq!(
+            stat(&fx.at("src/keep.rs")).mtime,
+            sys::file_time(1_577_934_245_000_000_123)
+        );
+        let undone = undo(&fx.base, &id).expect("undo");
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert_eq!(stat(&fx.at("src/keep.rs")).mtime, original);
+    }
+
+    #[test]
     fn copied_tombstones_keep_attributes() {
         let fx = Fixture::new("copy");
         let file = fx.at("src/keep.rs");

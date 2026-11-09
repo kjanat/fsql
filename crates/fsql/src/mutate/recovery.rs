@@ -565,8 +565,8 @@ fn build(
                 .mode
                 .map(|mode| sys::applied_mode(object.mode, mode))
                 .unwrap_or(after.mode);
-            after.atime = attrs.atime.unwrap_or(after.atime);
-            after.mtime = attrs.mtime.unwrap_or(after.mtime);
+            after.atime = attrs.atime.map(sys::file_time).unwrap_or(after.atime);
+            after.mtime = attrs.mtime.map(sys::file_time).unwrap_or(after.mtime);
             if !object.matches(&after) || attrs.atime.is_some() {
                 steps.push(Step::Attributes {
                     path: bytes(p),

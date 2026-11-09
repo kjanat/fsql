@@ -58,6 +58,10 @@ pub struct Pinned {
     name: CString,
 }
 
+pub fn file_time(nanos: i64) -> i64 {
+    nanos
+}
+
 #[cfg(target_os = "linux")]
 pub fn identity_birth(stat: &Stat) -> Option<i64> {
     stat.btime

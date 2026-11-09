@@ -65,6 +65,10 @@ pub fn identity_birth(_stat: &Stat) -> Option<i64> {
     None
 }
 
+pub fn file_time(nanos: i64) -> i64 {
+    nanos / NANOS_PER_TICK * NANOS_PER_TICK
+}
+
 pub fn applied_mode(current: u32, requested: u32) -> u32 {
     let base = if requested & 0o222 == 0 { 0o444 } else { 0o666 };
     (current & 0o111) | base
@@ -674,6 +678,15 @@ mod tests {
         assert!(stat.ino != 0);
         assert!(Accounts::default().user(&file, &stat).is_some());
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn stored_times_drop_digits_below_a_tick() {
+        assert_eq!(
+            file_time(1_577_934_245_000_000_123),
+            1_577_934_245_000_000_100
+        );
+        assert_eq!(file_time(-150), -100);
     }
 
     #[test]
