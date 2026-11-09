@@ -11,7 +11,7 @@ rr             = ["run", "--release"]
 "build:zed:locked" = ["build:zed", "--locked"]
 "check:doc"        = ["doc", "--workspace", "--no-deps", "--locked"]
 "check:fmt"        = ["fmt", "--all", "--check"]
-"lint:workspace"   = ["clippy", "--workspace", "--all-targets", "--locked"]
+"lint:workspace"   = ["clippy", "--workspace", "--all-features", "--all-targets", "--locked"]
 "test:workspace"   = ["test", "--workspace", "--locked"]
 
 fsql         = ["rr", "--bin", "fsql", "--package", "fsql-cli", "--"]
