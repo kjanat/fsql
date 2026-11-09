@@ -36,6 +36,26 @@ jobs:
       - name: Documentation
         run: run check:doc
 
+  platforms:
+    name: check (${{ matrix.os }})
+    concurrency:
+      group: ${{ github.workflow }}-platforms-${{ matrix.os }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: *isPR
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    cancel-timeout-minutes: 1
+    steps:
+      - *checkout
+      - *toolchain
+      - name: Test
+        run: cargo test --package fsql --all-features --locked
+      - name: Clippy
+        run: cargo clippy --package fsql --all-features --all-targets --locked
+
   formatting:
     concurrency:
       group: ${{ github.workflow }}-formatting-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
