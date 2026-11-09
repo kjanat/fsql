@@ -5,6 +5,7 @@ edition     = { workspace = true }
 description = "Command line interface for fsql"
 repository  = { workspace = true }
 license     = { workspace = true }
+readme      = { workspace = true }
 
 [[bin]]
 doc  = false
