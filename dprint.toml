@@ -1,6 +1,6 @@
 #:schema dprint.schema.json
 
-extends  = ["https://raw.githubusercontent.com/kjanat/kjanat/refs/heads/master/configs/dprint.remote.json"]
+extends  = "https://raw.githubusercontent.com/kjanat/kjanat/HEAD/configs/dprint.remote.json"
 excludes = [
   "**/target",
   "**/node_modules",
