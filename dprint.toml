@@ -1,6 +1,6 @@
 #:schema https://dprint.kjanat.dev/schemas/v0.json
 
-extends  = "https://cdn.jsdelivr.net/gh/kjanat/kjanat/configs/dprint.remote.json"
+extends  = "https://raw.githubusercontent.com/kjanat/kjanat/HEAD/configs/dprint.remote.json"
 excludes = [
   "**/target",
   "**/node_modules",
@@ -15,10 +15,6 @@ excludes = [
 [[exec.commands]]
 command = "rustfmt"
 exts    = ["rs"]
-
-[[exec.commands]]
-command = "tombi format - --stdin-filename {{file_path}}"
-exts    = ["toml"]
 
 [markdown]
 textWrap = "never"
