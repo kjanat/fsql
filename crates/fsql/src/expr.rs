@@ -29,7 +29,7 @@ pub(crate) fn string_literal(expr: &Expr) -> Option<&str> {
     }
 }
 
-/// Keep preparation and execution aligned on supported quantified operators.
+/// Return an error for quantified operators other than GLOB and the comparison operators.
 pub(crate) fn quantified_operator(op: &sqlparser::ast::BinaryOperator) -> crate::Result<()> {
     use sqlparser::ast::BinaryOperator;
     if matches!(

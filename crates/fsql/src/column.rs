@@ -195,7 +195,8 @@ impl Column {
         }
     }
 
-    /// Some filesystems report `DT_UNKNOWN` for `kind`, forcing a `statx` fallback.
+    /// `kind` costs `Dirent`, but on filesystems that report `DT_UNKNOWN` as
+    /// the entry type, reading `kind` needs a `statx` call.
     pub fn cost(self) -> Cost {
         match self {
             Self::Path

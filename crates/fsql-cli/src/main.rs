@@ -13,12 +13,16 @@ use fsql::plan::{Plan, Planner};
 use fsql::walk::{self, WalkOptions};
 
 #[derive(Parser)]
-#[command(name = "fsql", version, about = "SQL over the filesystem")]
+#[command(
+    name = "fsql",
+    version,
+    about = "Query and modify the filesystem with SQL"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// SQL to run; repeatable
+    /// SQL to run. You can pass this option more than once
     #[arg(short = 'e', long = "execute", value_name = "SQL")]
     execute: Vec<String>,
 
@@ -26,7 +30,7 @@ struct Cli {
     #[arg(value_name = "FILE")]
     file: Option<PathBuf>,
 
-    /// Load SQL from a file, or `-` for stdin
+    /// Read SQL from a file, or `-` for stdin
     #[arg(short = 'F', long, value_name = "FILE", conflicts_with = "file")]
     from_file: Option<PathBuf>,
 
@@ -46,47 +50,55 @@ struct Cli {
     #[arg(short = 'x', long)]
     one_file_system: bool,
 
-    /// Commit DELETE, UPDATE and INSERT statements instead of previewing them
+    /// Apply DELETE, UPDATE and INSERT statements. Without this option fsql
+    /// only previews their changes
     #[arg(long)]
     apply: bool,
 
-    /// Refuse to apply a statement touching more than this many entries; 0 disables
+    /// Refuse to apply a statement that touches more than this many entries. 0
+    /// removes the limit
     #[arg(long, default_value_t = 10_000, value_name = "N")]
     cap: usize,
 
-    /// Apply without tombstones or before-images; undo becomes impossible
+    /// Apply without tombstones or before-images. fsql cannot undo a statement
+    /// applied this way
     #[arg(long)]
     no_journal: bool,
 
-    /// Where journals live; defaults to $XDG_DATA_HOME/fsql/journal
+    /// Directory for journals. Defaults to $XDG_DATA_HOME/fsql/journal
     #[arg(long, value_name = "DIR")]
     journal_dir: Option<PathBuf>,
 
-    /// Entries shown in a preview
+    /// Number of entries a preview lists
     #[arg(long, default_value_t = 20, value_name = "N")]
     preview: usize,
 
-    /// Return partial SELECT results when filesystem entries cannot be read
+    /// Return the readable rows of a SELECT when some filesystem entries cannot
+    /// be read
     #[arg(long)]
     best_effort: bool,
 
-    /// Cumulative row allocation budget for query execution
+    /// Budget of cumulative retained row allocations for a query, intermediate
+    /// relations included
     #[arg(long, default_value_t = 1_000_000)]
     max_rows: usize,
 
-    /// Estimated value allocation budget in bytes
+    /// Budget of cumulative estimated retained value bytes for a query,
+    /// intermediate relations included
     #[arg(long, default_value_t = 268_435_456)]
     max_bytes: usize,
 
-    /// Maximum input rows and candidate join pairs examined
+    /// Maximum number of input rows and candidate join pairs a query may
+    /// examine
     #[arg(long, default_value_t = 10_000_000)]
     max_work: usize,
 
-    /// Stop execution after this many seconds (between filesystem calls)
+    /// Stop the query after this many seconds. The check runs between
+    /// filesystem calls
     #[arg(long)]
     timeout: Option<u64>,
 
-    /// Print counts only
+    /// In a preview, print the entry count without listing entries
     #[arg(short, long)]
     quiet: bool,
 }
@@ -95,12 +107,12 @@ struct Cli {
 enum Command {
     /// Reverse a previously applied statement
     Undo {
-        /// Journal id printed when the statement was applied
+        /// Journal id that fsql printed when it applied the statement
         id: String,
     },
     /// Finish interrupted prepared mutations or resume an interrupted undo
     Recover {
-        /// Journal id printed when the statement was applied
+        /// Journal id that fsql printed when it applied the statement
         id: String,
     },
     /// List applied statements that can be undone
@@ -315,7 +327,7 @@ fn mutate_plan(
         preview(cli, &resolved, out)?;
         writeln!(
             out,
-            "DRY RUN, nothing changed. Re-run with --apply to commit."
+            "This was a dry run and changed nothing. Re-run with --apply to commit."
         )
         .ok();
         return Ok(ExitCode::SUCCESS);
@@ -361,10 +373,10 @@ fn mutate_plan(
             journal.id(),
             journal.id()
         ),
-        (None, true) => writeln!(out, "{verb} affected {} entries{size}. No journal, no undo.", outcome.applied),
+        (None, true) => writeln!(out, "{verb} affected {} entries{size}. fsql wrote no journal and cannot undo this statement.", outcome.applied),
         (None, false) => writeln!(
             out,
-            "{verb} affected {} of {count} entries{size}, {} failed. No journal, no undo.",
+            "{verb} affected {} of {count} entries{size}, {} failed. fsql wrote no journal and cannot undo this statement.",
             outcome.applied,
             outcome.failures.len()
         ),

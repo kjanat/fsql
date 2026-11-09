@@ -1,7 +1,8 @@
-//! Durable per-entry redo/undo.
+//! Durable redo and undo of each mutated entry.
 //!
 //! Prepared objects stay on the target filesystem.
-//! Every externally visible step has an idempotent, identity-checked inverse.
+//! Every externally visible step has an idempotent inverse that checks object
+//! identity.
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -769,9 +770,10 @@ pub(super) fn is_replay_journal(base: &Path, id: &str) -> Result<bool> {
     Ok(base.join(id).join("replay-version").exists())
 }
 
-/// Finish interrupted prepared entries, or resume an interrupted undo. Entries
-/// whose preparation never completed are discarded; untouched rows are not run.
-/// Conflicting objects are preserved and reported in `Outcome::failures`.
+/// Finish interrupted prepared entries or resume an interrupted undo. Recovery
+/// discards entries whose preparation never completed and does not run rows
+/// that apply never reached. Conflicting objects stay in place and appear in
+/// `Outcome::failures`.
 pub fn recover(base: &Path, id: &str) -> Result<Outcome> {
     journal::validate_id(id)?;
     let dir = base.join(id);
@@ -850,8 +852,9 @@ fn verify_undo(dir: &Path, op: &Operation) -> Result<()> {
     Ok(())
 }
 
-/// Persist exactly the applied prefix, including a possibly interrupted step.
-/// Undo must not require a denied or otherwise impossible forward step to run.
+/// Return the inverses of exactly the forward steps that ran, including a step
+/// that may have been interrupted. Undo must not require a denied or otherwise
+/// impossible forward step to run.
 fn inverse_steps(dir: &Path, op: &Operation) -> Result<Vec<Step>> {
     if completed_file(dir, op.seq).exists() {
         verify_undo(dir, op)?;

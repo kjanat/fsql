@@ -1,4 +1,5 @@
-//! Per-execution limits and explicit handling of incomplete observations.
+//! Limits, error policy, cancellation and completion reports for one query
+//! execution.
 use std::cell::Cell;
 use std::sync::{
     Arc, Mutex,
@@ -75,7 +76,7 @@ pub struct ExecutionOptions {
     pub max_rows: usize,
     /// Cumulative estimated retained value bytes, including intermediate relations.
     pub max_bytes: usize,
-    /// Input rows and candidate join pairs examined across this execution.
+    /// Input rows and candidate join pairs that this execution may examine.
     pub max_work: usize,
     pub max_diagnostics: usize,
     pub timeout: Option<Duration>,

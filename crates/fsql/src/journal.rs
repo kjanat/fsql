@@ -141,8 +141,9 @@ impl Journal {
         self.dir.join("tomb").join(seq.to_string())
     }
 
-    /// Persist intent before issuing a syscall. An unfinished intent prevents
-    /// automatic undo, preserving the evidence for explicit reconciliation.
+    /// Durably write the intent record before the syscall runs. An unfinished
+    /// intent blocks automatic undo and stays on disk as evidence for explicit
+    /// reconciliation.
     pub fn begin(&mut self, record: &Record) -> Result<()> {
         let path = self.dir.join(format!("pending-{}.json", record.seq()));
         let data = serde_json::to_vec(record).map_err(|e| Error::Plan(e.to_string()))?;
@@ -304,7 +305,8 @@ pub(crate) fn lock(dir: &Path) -> Result<Lock> {
     Ok(Lock(file))
 }
 
-/// Publish a complete checkpoint; a torn temporary file is never replayed.
+/// Write `data` to a temporary file, sync it, rename it over `path`, and sync
+/// the directory. Replay never reads a partly written temporary file.
 pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let temporary = path.with_extension("tmp");
     let mut file = OpenOptions::new()

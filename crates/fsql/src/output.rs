@@ -41,7 +41,7 @@ pub fn write(out: &mut dyn Write, set: &ResultSet, format: Format) -> io::Result
     }
 }
 
-/// Write a single record in a format that does not need whole-result layout.
+/// Write one row in `json` or `lines` format. Any other format returns an error.
 pub fn write_row(
     out: &mut dyn Write,
     headers: &[String],

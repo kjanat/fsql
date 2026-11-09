@@ -1,4 +1,4 @@
-//! Shared glob semantics for row evaluation and traversal proofs.
+//! Glob compilation shared by row evaluation and directory pruning.
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::error::{Error, Result};
