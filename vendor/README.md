@@ -16,6 +16,8 @@ License: Apache-2.0, in [`sqlparser/LICENSE.TXT`]
 
 `fuzz/Cargo.toml` and `sqlparser_bench/Cargo.toml` name the parser dependency `package = "fsql-sqlparser"`. `sqlparser_bench/Cargo.toml` declares its own `[workspace]`, like `fuzz/Cargo.toml`.
 
+The version badge in `README.md` points at `fsql-sqlparser`.
+
 `src/dialect/mod.rs`
 
 - `Dialect::supports_byte_unit_suffixes` defaults to `false`.

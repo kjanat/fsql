@@ -2,10 +2,9 @@
 
 > SQL over the filesystem.
 
-<!--[![Crates.io](https://img.shields.io/crates/v/fsql?logo=rust&labelColor=B7410E&color=black)](https://crates.io/crates/fsql)-->
-<!--[![NPM](https://img.shields.io/npm/v/fsql?logo=npm&labelColor=CB3837&color=black)](https://npm.im/fsql)-->
+[![fsql on crates.io](https://img.shields.io/crates/v/fsql?label=fsql&logo=rust&labelColor=B7410E&color=black)][crates-fsql] [![fsql-cli on crates.io](https://img.shields.io/crates/v/fsql-cli?label=fsql-cli&logo=rust&labelColor=B7410E&color=black)][crates-fsql-cli] [![fsql-sqlparser on crates.io](https://img.shields.io/crates/v/fsql-sqlparser?label=fsql-sqlparser&logo=rust&labelColor=B7410E&color=black)][crates-fsql-sqlparser] [![License: MIT + Apache-2.0](https://img.shields.io/badge/license-MIT%20%2B%20Apache--2.0-blue)](#license)
 
-[![License: MIT](https://img.shields.io/npm/l/fsql?color=blue)](./LICENSE)
+<!--[![NPM](https://img.shields.io/npm/v/fsql?logo=npm&labelColor=CB3837&color=black)](https://npm.im/fsql)-->
 
 Query with `SELECT`, change with `DELETE`, `UPDATE` and `INSERT`.
 
@@ -261,9 +260,10 @@ Execution defaults to budgets of 1,000,000 cumulative retained row allocations, 
 `Engine` returns opaque prepared queries and resolved mutations. Each one captures the execution policy at preparation time. The mutation cap also applies to library callers. Low-level modules remain available for callers that manage their own plans and policies.
 
 ```rust
+use std::ops::ControlFlow;
+
 use fsql::walk::WalkOptions;
 use fsql::{Engine, ErrorPolicy};
-use std::ops::ControlFlow;
 
 fn main() -> fsql::Result<()> {
     let mut engine = Engine::new(".", WalkOptions::default());
@@ -295,6 +295,14 @@ The [benchmark guide](benchmarks/README.md) covers repeatable CLI comparisons ag
 
 [`vendor/sqlparser`] is a patched copy of [`sqlparser-rs`], described in `vendor/README.md`. fsql uses [`tree-fucker`] 0.1.0 from crates.io for the one-shot `Scan` that performs the `files` traversal. The scan lists each directory directly, never follows a symbolic link, and applies the mount-crossing policy at every domain boundary. `-x` therefore stays on the root's filesystem, while a plain walk crosses into mounts beneath the root. Rows stream as each directory's listing completes. tree-fucker's process-wide resource governor limits traversal operations, and the CLI configures that governor with one full worker of foreground time. fsql reads metadata lazily with its own `statx` and `readlinkat` calls. These reads use the listed directory's descriptor while an anchor is available, and an absolute path once the bounded anchor allowance runs out. The traversal governor does not limit them. The same library backs the `mounts` probe. Cancelling a query also cancels active scans. Resource-limit and quarantine events stay fatal in best-effort mode.
 
+## License
+
+| Part                                  | License                                                                                                   |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `fsql`, `fsql-cli`, the Zed extension | MIT, [`LICENSE`](LICENSE) and [`editors/zed/LICENSE`](editors/zed/LICENSE)                                |
+| `fsql-sqlparser` (`vendor/sqlparser`) | Apache-2.0, [`LICENSE.TXT`](vendor/sqlparser/LICENSE.TXT) and [`NOTICE.TXT`](vendor/sqlparser/NOTICE.TXT) |
+| `tree-sitter-fsql`                    | MIT, copyright Derek Stride, [`tree-sitter-fsql/LICENSE`](tree-sitter-fsql/LICENSE)                       |
+
 [`vendor/sqlparser`]: ./vendor/sqlparser/
 [`sqlparser-rs`]: https://github.com/apache/datafusion-sqlparser-rs
 [`tree-fucker`]: https://crates.io/crates/tree-fucker
@@ -302,3 +310,7 @@ The [benchmark guide](benchmarks/README.md) covers repeatable CLI comparisons ag
 [query file]: crates/fsql/examples/queries/largest-files.fsql
 [executables, permissions, duplicate sizes, and directory usage]: examples/README.md
 [runnable examples]: examples/README.md
+
+[crates-fsql]: https://crates.io/crates/fsql
+[crates-fsql-cli]: https://crates.io/crates/fsql-cli
+[crates-fsql-sqlparser]: https://crates.io/crates/fsql-sqlparser
