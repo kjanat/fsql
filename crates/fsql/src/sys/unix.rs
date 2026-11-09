@@ -550,7 +550,7 @@ pub fn rename_replace(from: &Dir, from_name: &Name, to: &Dir, to_name: &Name) ->
     )?)
 }
 
-pub fn symlink(target: &[u8], dir: &Dir, name: &Name) -> io::Result<()> {
+pub fn symlink(target: &[u8], dir: &Dir, name: &Name, _home: &Path) -> io::Result<()> {
     Ok(rustix::fs::symlinkat(
         OsStr::from_bytes(target),
         &dir.0,
@@ -633,6 +633,10 @@ pub fn private_dir(dir: &Dir, name: &Name) -> io::Result<()> {
 
 pub fn symlink_path(target: &[u8], link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(OsStr::from_bytes(target), link)
+}
+
+pub fn symlink_from(target: &[u8], link: &Path, _home: &Path) -> io::Result<()> {
+    symlink_path(target, link)
 }
 
 pub fn not_found(error: &io::Error) -> bool {

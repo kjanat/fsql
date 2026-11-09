@@ -58,6 +58,7 @@ pub struct NewEntry {
     pub mtime: Option<i64>,
     pub source: Option<PathBuf>,
     source_identity: Option<Identity>,
+    link_parent: Option<PathBuf>,
     pub content: Option<Vec<u8>>,
 }
 
@@ -452,6 +453,7 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
         mtime: None,
         source: None,
         source_identity: None,
+        link_parent: None,
         content: None,
     };
     let mut kind_given = false;
@@ -747,6 +749,10 @@ fn relocate(pinned: &Pinned, dir: &Dir, name: &Name, path: &Path) -> Result<Pinn
     sys::relocate(pinned, dir, name).map_err(|e| io(path, e))
 }
 
+fn home(path: &Path) -> &Path {
+    path.parent().unwrap_or(path)
+}
+
 fn stat_pinned(pinned: &Pinned, path: &Path) -> Result<sys::Stat> {
     sys::stat_pinned(pinned).map_err(|e| io(path, e))
 }
@@ -774,7 +780,7 @@ fn set_target(dir: &Dir, name: &Name, path: &Path, target: &[u8]) -> Result<Pinn
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
     let temporary = sys::name_of(OsStr::new(&temporary), path)?;
-    sys::symlink(target, dir, &temporary).map_err(|e| io(path, e))?;
+    sys::symlink(target, dir, &temporary, home(path)).map_err(|e| io(path, e))?;
     let result = (|| {
         let pinned = pin(dir, &temporary, path)?;
         sys::rename_replace(dir, &temporary, dir, name).map_err(|e| io(path, e))?;
@@ -1001,8 +1007,13 @@ fn apply_insert_observed(
                         .map_err(|e| io(&entry.path, e))?,
                 ),
                 Kind::Symlink => {
-                    sys::symlink(entry.target.as_deref().unwrap_or(b""), &dirfd, &name)
-                        .map_err(|e| io(&entry.path, e))?;
+                    sys::symlink(
+                        entry.target.as_deref().unwrap_or(b""),
+                        &dirfd,
+                        &name,
+                        entry.link_parent.as_deref().unwrap_or(home(&entry.path)),
+                    )
+                    .map_err(|e| io(&entry.path, e))?;
                     None
                 }
                 _ => return Err(Error::Unsupported("creating special files".into())),
@@ -1128,7 +1139,7 @@ fn restore_delete(
             set_mode(&pin(&dir, &name, path)?, path, mode)
         }
         (None, Kind::Symlink) => {
-            sys::symlink(target.unwrap_or(b""), &dir, &name).map_err(|e| io(path, e))
+            sys::symlink(target.unwrap_or(b""), &dir, &name, home(path)).map_err(|e| io(path, e))
         }
         (None, other) => Err(Error::Plan(format!("cannot recreate a {}", other.as_str()))),
     }
@@ -1680,6 +1691,17 @@ mod tests {
         assert!(!fx.exists("build/a.tmp"));
     }
 
+    #[cfg(unix)]
+    fn directory_link(path: &Path) -> bool {
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+    }
+
+    #[cfg(windows)]
+    fn directory_link(path: &Path) -> bool {
+        use std::os::windows::fs::FileTypeExt;
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink_dir())
+    }
+
     #[test]
     fn renaming_a_file_to_an_executable_extension_round_trips() {
         let fx = Fixture::new("executable-name");
@@ -1724,6 +1746,41 @@ mod tests {
         let undone = undo(&fx.base, &id).expect("undo");
         assert_eq!(undone.applied, 1, "{:?}", undone.failures);
         assert_eq!(mode(&fx.at("src/kept.rs")), shown(0o200, false));
+    }
+
+    #[test]
+    fn directory_links_resolve_from_their_final_parent() {
+        let fx = Fixture::new("directory-links");
+        let up = |parts: &[&str]| {
+            parts
+                .iter()
+                .fold(PathBuf::from(".."), |path, part| path.join(part))
+                .display()
+                .to_string()
+        };
+        let (outcome, _) = fx.run(&format!(
+            "insert into files (path, kind, target) values ('{}', 'symlink', 'build')",
+            fx.at("dirlink").display()
+        ));
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        let (outcome, _) = fx.run(&format!(
+            "update files set target = '{}' where name = 'link'",
+            up(&["build"])
+        ));
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(directory_link(&fx.at("dirlink")));
+        assert!(directory_link(&fx.at("src/link")));
+        let resolved = fx.resolve(&format!(
+            "update files set target = '{}' where name = 'link'",
+            up(&["build", "nested"])
+        ));
+        let outcome = apply(&resolved, None).expect("apply");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(directory_link(&fx.at("src/link")));
+        assert_eq!(
+            std::fs::read_link(fx.at("src/link")).expect("link"),
+            PathBuf::from(up(&["build", "nested"]))
+        );
     }
 
     #[test]

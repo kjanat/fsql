@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{File, FileTimes, OpenOptions};
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::fs::{FileTimesExt, MetadataExt, OpenOptionsExt};
+use std::os::windows::fs::{FileTimesExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -384,24 +384,47 @@ pub fn rename_noreplace(from: &Dir, from_name: &Name, to: &Dir, to_name: &Name) 
 }
 
 pub fn rename_replace(from: &Dir, from_name: &Name, to: &Dir, to_name: &Name) -> io::Result<()> {
-    std::fs::rename(child(from, from_name), child(to, to_name))
+    let source = child(from, from_name);
+    let destination = child(to, to_name);
+    match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink_dir() => {
+            replace_directory_link(&source, &destination)
+        }
+        _ => std::fs::rename(source, destination),
+    }
+}
+
+fn replace_directory_link(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let aside = destination.with_file_name(format!(
+        ".fsql-replaced-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    renamore::rename_exclusive(destination, &aside)?;
+    if let Err(error) = renamore::rename_exclusive(source, destination) {
+        renamore::rename_exclusive(&aside, destination)?;
+        return Err(error);
+    }
+    std::fs::remove_dir(&aside)
 }
 
 pub fn symlink_path(target: &[u8], link: &Path) -> io::Result<()> {
+    symlink_from(target, link, link.parent().unwrap_or(link))
+}
+
+pub fn symlink_from(target: &[u8], link: &Path, home: &Path) -> io::Result<()> {
     let target = PathBuf::from(os_from_bytes(target));
-    let resolved = match link.parent() {
-        Some(parent) => parent.join(&target),
-        None => target.clone(),
-    };
-    if std::fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir()) {
+    if std::fs::metadata(home.join(&target)).is_ok_and(|metadata| metadata.is_dir()) {
         std::os::windows::fs::symlink_dir(&target, link)
     } else {
         std::os::windows::fs::symlink_file(&target, link)
     }
 }
 
-pub fn symlink(target: &[u8], dir: &Dir, name: &Name) -> io::Result<()> {
-    symlink_path(target, &child(dir, name))
+pub fn symlink(target: &[u8], dir: &Dir, name: &Name, home: &Path) -> io::Result<()> {
+    symlink_from(target, &child(dir, name), home)
 }
 
 fn apply_readonly(path: &Path, mode: u32) -> io::Result<()> {

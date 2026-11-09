@@ -485,6 +485,7 @@ fn build(
                 return Err(Error::Stale(entry.path.clone()));
             }
             let mut prepared = entry.clone();
+            prepared.link_parent = entry.path.parent().map(Path::to_path_buf);
             prepared.path = stage.join("new");
             let out = apply_insert(std::slice::from_ref(&prepared), None)?;
             if let Some((_, error)) = out.failures.into_iter().next() {
@@ -538,7 +539,7 @@ fn build(
             }
             if let Some(link) = &attrs.target {
                 let new = stage.join("new");
-                sys::symlink_path(link, &new).map_err(|e| std_io(&new, e))?;
+                sys::symlink_from(link, &new, home(p)).map_err(|e| std_io(&new, e))?;
                 journal::sync_dir(stage)?;
                 let prepared = Snapshot::required(&new)?;
                 steps.push(Step::Move {
