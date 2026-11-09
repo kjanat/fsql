@@ -32,7 +32,7 @@ jobs:
       - name: Build Zed WASM adapter
         run: run build:zed
       - name: Clippy
-        run: run lint:workspace
+        run: run lint --locked
       - name: Documentation
         run: run check:doc
 

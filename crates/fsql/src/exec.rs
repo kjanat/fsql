@@ -626,7 +626,7 @@ fn order_set(
                 .ok_or_else(|| Error::UnknownColumn(ident.value.clone())),
             Expr::Value(literal) => match &literal.value {
                 Literal::Number(text, _) => {
-                    let position: usize = text.parse().map_err(|_| {
+                    let position: usize = text.to_string().parse().map_err(|_| {
                         Error::Plan(format!("ORDER BY position `{text}` is not a number"))
                     })?;
                     if position == 0 || position > set.headers.len() {
@@ -1204,7 +1204,7 @@ fn order_sources(order_by: &[OrderKey], prepared: &Prepared) -> Result<Vec<Order
             if let Expr::Value(literal) = &key.expr
                 && let Literal::Number(text, _) = &literal.value
             {
-                let position: usize = text.parse().map_err(|_| {
+                let position: usize = text.to_string().parse().map_err(|_| {
                     Error::Plan(format!("ORDER BY position `{text}` is not a number"))
                 })?;
                 if position == 0 || position > prepared.headers.len() {

@@ -786,7 +786,7 @@ fn column(name: &str, row: &dyn Row) -> Result<Value> {
 fn literal_value(literal: &Literal) -> Result<Value> {
     match literal {
         Literal::Number(text, _) => {
-            let cleaned: String = text.chars().filter(|c| *c != '_').collect();
+            let cleaned: String = text.to_string().chars().filter(|c| *c != '_').collect();
             if let Ok(n) = cleaned.parse::<i64>() {
                 return Ok(Value::Int(n));
             }

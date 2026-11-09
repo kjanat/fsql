@@ -143,7 +143,7 @@ fn infallible_guard(expr: &Expr, alias: &str) -> bool {
         } => {
             let integer = |expr: &Expr| {
                 matches!(unnest(expr), Expr::Value(v)
-                if matches!(&v.value, Value::Number(n, _) if n.parse::<i64>().is_ok()))
+                if matches!(&v.value, Value::Number(n, _) if n.to_string().parse::<i64>().is_ok()))
             };
             (local_column(left, alias, "depth") && integer(right))
                 || (integer(left) && local_column(right, alias, "depth"))

@@ -161,6 +161,7 @@ fn query_schema(
                     unreachable!()
                 };
                 let n = n
+                    .to_string()
                     .parse::<usize>()
                     .map_err(|_| Error::Plan("invalid ORDER BY position".into()))?;
                 if n == 0 || n > headers.len() {
