@@ -13,7 +13,7 @@ while [ -L "${SOURCE_PATH}" ]; do
 done
 # shellcheck disable=SC1007
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${SOURCE_PATH}")" && pwd)"
-MANIFEST="${SCRIPT_DIR}/../crates/fsql-cli/Cargo.toml"
+MANIFEST="${SCRIPT_DIR}/../crates/fsql/Cargo.toml"
 [ -f "${MANIFEST}" ] || {
 	printf 'error: %s not found\n' "${MANIFEST}" >&2
 	exit 1

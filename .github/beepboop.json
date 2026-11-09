@@ -44,7 +44,7 @@
                 {
                   "toolchain": "cargo",
                   "name": "fsql",
-                  "manifest": "crates/fsql-cli/Cargo.toml",
+                  "manifest": "crates/fsql/Cargo.toml",
                   "asset": "{name}-{rust.target}{ext}"
                 }
               ],

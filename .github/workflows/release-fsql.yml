@@ -93,7 +93,7 @@ jobs:
       - name: Build fsql
         shell: bash
         env:
-          MANIFEST: crates/fsql-cli/Cargo.toml
+          MANIFEST: crates/fsql/Cargo.toml
           BINARY: fsql
           TARGET: ${{ matrix.target }}
           EXT: ${{ matrix.ext }}

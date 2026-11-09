@@ -450,8 +450,9 @@ dependencies = [
 
 [[package]]
 name = "fsql"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
+ "clap",
  "criterion",
  "fsql-sqlparser",
  "globset",
@@ -469,16 +470,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "fsql-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "fsql",
-]
-
-[[package]]
 name = "fsql-sqlparser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bigdecimal",
  "log",

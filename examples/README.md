@@ -7,7 +7,7 @@ fsql -C crates -F examples/inventory.fsql
 fsql -C crates -F examples/by-extension.fsql
 ```
 
-For an uninstalled checkout, use `cargo run --release -p fsql-cli --` in place of `fsql`.
+For an uninstalled checkout, use `cargo run --release -p fsql --` in place of `fsql`.
 
 All reporting queries accept a scan root through `-C`:
 

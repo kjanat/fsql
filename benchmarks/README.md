@@ -9,7 +9,7 @@ The benchmarks have three suites:
 Build the CLI before running the command suite:
 
 ```sh
-cargo build --release --package fsql-cli --locked
+cargo build --release --package fsql --bin fsql --locked
 uv run bench
 ```
 
