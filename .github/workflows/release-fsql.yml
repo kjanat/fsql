@@ -51,6 +51,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    timeout-minutes: 120
     if: ${{ inputs.beepboop_operation == 'prepare' }}
   publish:
     runs-on: ubuntu-latest
@@ -82,7 +83,7 @@ jobs:
       - id: beepboop_refs
         uses: kjanat/beepboop/actions/publish-refs@v1
         env:
-          ${{ insert }}: ${{ fromJSON(steps.beepboop_token.outputs.gitId) }}
+          ${{ insert }}: ${{ fromJSON(steps.beepboop_token.outputs.gitId || '{}') }}
         with:
           token: ${{ steps.beepboop_token.outputs.token }}
       - uses: kjanat/beepboop/actions/publish-release@v1
@@ -91,5 +92,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    timeout-minutes: 210
     if: ${{ inputs.beepboop_operation == 'publish' }}
 run-name: ${{ inputs.beepboop_title || github.workflow }}
