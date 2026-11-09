@@ -14,9 +14,9 @@ use windows_permissions::{LocalBox, SecurityDescriptor, Sid};
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_WRITE_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE,
 };
 
 use super::Stat;
@@ -186,17 +186,17 @@ fn open_directory(path: &Path) -> Result<File> {
         false,
     )
     .map_err(|e| super::io(path, e))?;
-    let attributes = handle
+    let file_type = handle
         .metadata()
         .map_err(|e| super::io(path, e))?
-        .file_attributes();
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        .file_type();
+    if file_type.is_symlink() {
         return Err(super::io(
             path,
-            io::Error::other("refusing to follow a reparse point"),
+            io::Error::other("refusing to follow a link"),
         ));
     }
-    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+    if !file_type.is_dir() {
         return Err(super::io(path, io::ErrorKind::NotADirectory.into()));
     }
     Ok(handle)
@@ -737,6 +737,29 @@ mod tests {
         assert!(std::fs::rename(root.join("outer").join("inner"), root.join("moved")).is_err());
         drop(held);
         std::fs::rename(root.join("outer"), root.join("moved")).expect("rename");
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn chains_refuse_directory_links_and_junctions() {
+        let root = std::env::temp_dir().join(format!("fsql-windows-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real")).expect("dir");
+        std::os::windows::fs::symlink_dir(root.join("real"), root.join("link")).expect("link");
+        let junction = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(root.join("junction"))
+            .arg(root.join("real"))
+            .status()
+            .expect("mklink");
+        assert!(junction.success());
+        assert!(open_chain(&root.join("real")).is_ok());
+        for refused in ["link", "junction"] {
+            let Err(Error::Io { source, .. }) = open_chain(&root.join(refused)) else {
+                panic!("{refused} opened");
+            };
+            assert_eq!(source.to_string(), "refusing to follow a link", "{refused}");
+        }
         std::fs::remove_dir_all(&root).expect("cleanup");
     }
 
