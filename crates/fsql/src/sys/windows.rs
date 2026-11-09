@@ -317,6 +317,10 @@ pub fn pin_file(file: &File, _dir: &Dir, _name: &Name) -> io::Result<Pinned> {
     Ok(Pinned(file.try_clone()?))
 }
 
+pub fn relocate(pinned: &Pinned, _dir: &Dir, _name: &Name) -> io::Result<Pinned> {
+    Ok(Pinned(pinned.0.try_clone()?))
+}
+
 pub fn stat_pinned(pinned: &Pinned) -> io::Result<Stat> {
     stat_handle(&pinned.0)
 }

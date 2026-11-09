@@ -743,6 +743,10 @@ fn pin(dir: &Dir, name: &Name, path: &Path) -> Result<Pinned> {
     sys::pin(dir, name).map_err(|e| io(path, e))
 }
 
+fn relocate(pinned: &Pinned, dir: &Dir, name: &Name, path: &Path) -> Result<Pinned> {
+    sys::relocate(pinned, dir, name).map_err(|e| io(path, e))
+}
+
 fn stat_pinned(pinned: &Pinned, path: &Path) -> Result<sys::Stat> {
     sys::stat_pinned(pinned).map_err(|e| io(path, e))
 }
@@ -774,7 +778,7 @@ fn set_target(dir: &Dir, name: &Name, path: &Path, target: &[u8]) -> Result<Pinn
     let result = (|| {
         let pinned = pin(dir, &temporary, path)?;
         sys::rename_replace(dir, &temporary, dir, name).map_err(|e| io(path, e))?;
-        Ok(pinned)
+        relocate(&pinned, dir, name, path)
     })();
     if result.is_err() {
         let _ = sys::unlink(dir, &temporary, Kind::Symlink);
@@ -876,6 +880,7 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                         name = new_name;
                         path = destination.clone();
                         after.path = Some(path_bytes(destination));
+                        replacement = Some(relocate(&pinned, &dirfd, &name, &path)?);
                     }
                     Change::Target(target) => {
                         replacement = Some(set_target(&dirfd, &name, &path, target)?);
@@ -1154,6 +1159,7 @@ fn restore_update(
         let (new_dirfd, new_name) = rename(&dirfd, &name, &current, original)?;
         dirfd = new_dirfd;
         name = new_name;
+        pinned = relocate(&pinned, &dirfd, &name, original)?;
     }
     if after.target.is_some()
         && let Some(target) = &before.target
@@ -1700,6 +1706,24 @@ mod tests {
         let undone = undo(&fx.base, &id).expect("undo");
         assert_eq!(undone.applied, 1, "{:?}", undone.failures);
         assert_eq!(stat(&fx.at("src/keep.rs")).mtime, original);
+    }
+
+    #[test]
+    fn unreadable_files_can_be_renamed_changed_deleted_and_restored() {
+        let fx = Fixture::new("unreadable");
+        chmod(&fx.at("src/keep.rs"), 0o000);
+        let resolved = fx.resolve("update files set name = 'kept.rs' where name = 'keep.rs'");
+        let outcome = apply(&resolved, None).expect("apply");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        let (outcome, _) = fx.run("update files set mode = 0o200 where name = 'kept.rs'");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert_eq!(mode(&fx.at("src/kept.rs")), shown(0o200, false));
+        let (outcome, id) = fx.run("delete from files where name = 'kept.rs'");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(!fx.exists("src/kept.rs"));
+        let undone = undo(&fx.base, &id).expect("undo");
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert_eq!(mode(&fx.at("src/kept.rs")), shown(0o200, false));
     }
 
     #[test]
