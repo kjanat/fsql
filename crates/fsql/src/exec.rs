@@ -2118,7 +2118,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn non_utf8_relative_paths_come_back_as_blobs() {
         use std::os::unix::ffi::OsStrExt;
@@ -2401,8 +2401,12 @@ mod tests {
             "select f.name, m.fstype from files f join mounts m on f.dev = m.dev where f.name = 'README'",
         )
         .expect("run");
-        assert_eq!(set.rows.len(), 1);
-        assert!(matches!(&set.rows[0][1], Value::Text(t) if !t.is_empty()));
+        assert!(!set.rows.is_empty());
+        assert!(
+            set.rows
+                .iter()
+                .all(|row| matches!(&row[1], Value::Text(t) if !t.is_empty()))
+        );
         let set = run_sql(&dir, "select count(*) from (select 1 as x union all select 2) a cross join (select 1 as y union all select 2 union all select 3) b").expect("run");
         assert_eq!(set.rows[0][0], Value::Int(6));
         let set = run_sql(

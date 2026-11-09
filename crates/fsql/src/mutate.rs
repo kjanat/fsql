@@ -1324,8 +1324,9 @@ mod tests {
 
     impl Fixture {
         fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("fsql-mutate-{}-{name}", std::process::id()));
+            let root = std::fs::canonicalize(std::env::temp_dir())
+                .expect("temp")
+                .join(format!("fsql-mutate-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let dir = root.join("tree");
             let build = dir.join("build");

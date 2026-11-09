@@ -483,6 +483,7 @@ dependencies = [
  "globset",
  "ignore",
  "jwalk",
+ "libc",
  "regex",
  "renamore",
  "rustix",

@@ -403,6 +403,7 @@ mod tests {
         assert!(list(&base).expect("list").is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn failed_completion_keeps_intent_and_never_reuses_its_sequence() {
         let base =

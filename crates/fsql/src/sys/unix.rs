@@ -43,13 +43,23 @@ impl Name {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 pub struct Pinned(OwnedFd);
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 pub struct Pinned {
     dir: OwnedFd,
     name: CString,
+}
+
+#[cfg(target_os = "linux")]
+pub fn identity_birth(stat: &Stat) -> Option<i64> {
+    stat.btime
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn identity_birth(_stat: &Stat) -> Option<i64> {
+    None
 }
 
 pub fn applied_mode(_current: u32, requested: u32) -> u32 {
@@ -281,7 +291,7 @@ pub fn pin(dir: &Dir, name: &Name) -> io::Result<Pinned> {
     )?))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 pub fn pin(dir: &Dir, name: &Name) -> io::Result<Pinned> {
     stat::at(&dir.0, &name.0, false)?;
     Ok(Pinned {
@@ -290,12 +300,51 @@ pub fn pin(dir: &Dir, name: &Name) -> io::Result<Pinned> {
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_vendor = "apple")]
+pub fn pin(dir: &Dir, name: &Name) -> io::Result<Pinned> {
+    let event_only = OFlags::from_bits_retain(libc::O_EVTONLY.cast_unsigned());
+    Ok(Pinned(rustix::fs::openat(
+        &dir.0,
+        &name.0,
+        event_only | OFlags::SYMLINK | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?))
+}
+
+#[cfg(target_vendor = "apple")]
+pub fn stat_pinned(pinned: &Pinned) -> io::Result<Stat> {
+    Ok(stat::fd(&pinned.0)?)
+}
+
+#[cfg(target_vendor = "apple")]
+pub fn set_mode(pinned: &Pinned, mode: u32) -> io::Result<()> {
+    Ok(rustix::fs::fchmod(&pinned.0, raw_mode(mode))?)
+}
+
+#[cfg(target_vendor = "apple")]
+pub fn set_owner(pinned: &Pinned, owner: &super::Owner) -> io::Result<()> {
+    Ok(rustix::fs::fchown(
+        &pinned.0,
+        owner.uid.map(Uid::from_raw),
+        owner.gid.map(Gid::from_raw),
+    )?)
+}
+
+#[cfg(target_vendor = "apple")]
+pub fn set_times(pinned: &Pinned, atime: Option<i64>, mtime: Option<i64>) -> io::Result<()> {
+    let times = Timestamps {
+        last_access: timespec(atime),
+        last_modification: timespec(mtime),
+    };
+    Ok(rustix::fs::futimens(&pinned.0, &times)?)
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 pub fn pin_file(file: &File, _dir: &Dir, _name: &Name) -> io::Result<Pinned> {
     Ok(Pinned(rustix::io::fcntl_dupfd_cloexec(file, 0)?))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 pub fn pin_file(_file: &File, dir: &Dir, name: &Name) -> io::Result<Pinned> {
     pin(dir, name)
 }
@@ -305,7 +354,7 @@ pub fn stat_pinned(pinned: &Pinned) -> io::Result<Stat> {
     Ok(stat::fd(&pinned.0)?)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 pub fn stat_pinned(pinned: &Pinned) -> io::Result<Stat> {
     Ok(stat::at(&pinned.dir, &pinned.name, false)?)
 }
@@ -332,7 +381,7 @@ pub fn set_mode(pinned: &Pinned, mode: u32) -> io::Result<()> {
     )?)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 pub fn set_mode(pinned: &Pinned, mode: u32) -> io::Result<()> {
     Ok(rustix::fs::chmodat(
         &pinned.dir,
@@ -351,11 +400,12 @@ fn pinned_at(pinned: &Pinned) -> (&OwnedFd, &std::ffi::CStr, AtFlags) {
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 fn pinned_at(pinned: &Pinned) -> (&OwnedFd, &std::ffi::CStr, AtFlags) {
     (&pinned.dir, &pinned.name, AtFlags::SYMLINK_NOFOLLOW)
 }
 
+#[cfg(not(target_vendor = "apple"))]
 pub fn set_owner(pinned: &Pinned, owner: &super::Owner) -> io::Result<()> {
     let (fd, name, flags) = pinned_at(pinned);
     Ok(rustix::fs::chownat(
@@ -380,6 +430,7 @@ fn timespec(nanos: Option<i64>) -> Timespec {
     }
 }
 
+#[cfg(not(target_vendor = "apple"))]
 pub fn set_times(pinned: &Pinned, atime: Option<i64>, mtime: Option<i64>) -> io::Result<()> {
     let times = Timestamps {
         last_access: timespec(atime),
@@ -549,9 +600,16 @@ pub fn effective_root() -> bool {
 
 const XATTR_MAX: usize = 65_536;
 
+#[cfg(target_os = "linux")]
 fn xattr_absent(errno: rustix::io::Errno) -> bool {
     use rustix::io::Errno;
     errno == Errno::NODATA || errno == Errno::OPNOTSUPP || errno == Errno::NOTSUP
+}
+
+#[cfg(not(target_os = "linux"))]
+fn xattr_absent(errno: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    errno == Errno::NOATTR || errno == Errno::OPNOTSUPP || errno == Errno::NOTSUP
 }
 
 pub fn xattr_names(path: &Path) -> Result<Vec<Vec<u8>>> {

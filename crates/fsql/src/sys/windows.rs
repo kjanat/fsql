@@ -64,6 +64,10 @@ fn child(dir: &Dir, name: &Name) -> PathBuf {
     dir.path.join(&name.0)
 }
 
+pub fn identity_birth(_stat: &Stat) -> Option<i64> {
+    None
+}
+
 pub fn applied_mode(current: u32, requested: u32) -> u32 {
     let base = if requested & 0o222 == 0 { 0o444 } else { 0o666 };
     (current & 0o111) | base

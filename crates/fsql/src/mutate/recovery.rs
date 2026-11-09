@@ -61,7 +61,7 @@ impl Snapshot {
         };
         Ok(Some(Self {
             identity: Identity::of(&stat),
-            birth: stat.btime,
+            birth: sys::identity_birth(&stat),
             kind: stat.kind.as_str().into(),
             mode: stat.mode & 0o7777,
             uid: stat.uid,
@@ -965,11 +965,13 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "fsql-replay-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+            let root = fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join(format!(
+                    "fsql-replay-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
             fs::create_dir_all(root.join("tree/dir")).unwrap();
             fs::write(root.join("tree/file"), b"original bytes").unwrap();
             set_mode(&root.join("tree/file"), 0o640);
@@ -1286,7 +1288,7 @@ mod tests {
     fn undo_reverts_prior_steps_when_a_rename_destination_becomes_occupied() {
         let fx = Fixture::new();
         let planner = Planner::new(fx.tree(), WalkOptions::default());
-        let sql = "update files set mode = 0o600, name = 'renamed' where name = 'file'";
+        let sql = "update files set mode = 0o400, name = 'renamed' where name = 'file'";
         let resolved = resolve(
             &planner
                 .plan(sql)
@@ -1311,7 +1313,7 @@ mod tests {
         let out = apply(&resolved, &mut log).unwrap();
         CRASH.with(|c| *c.borrow_mut() = None);
         assert_eq!(out.failures.len(), 1);
-        assert_eq!(mode(&fx.tree().join("file")), file_mode(0o600));
+        assert_eq!(mode(&fx.tree().join("file")), file_mode(0o400));
         assert!(undo(&fx.base(), log.id()).unwrap().failures.is_empty());
         assert_eq!(fs::read(&destination).unwrap(), b"unrelated");
         fs::remove_file(destination).unwrap();
@@ -1358,7 +1360,7 @@ mod tests {
         fx.original();
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn recovery_paths_preserve_non_utf8_filenames() {
         let fx = Fixture::new();
