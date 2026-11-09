@@ -1,0 +1,50 @@
+{
+  "$schema": "https://beepboop.kjanat.dev/schema/v1.json",
+  "streams": {
+    "main": {
+      "packages": [
+        "pkg:cargo/fsql",
+        "pkg:cargo/fsql-cli",
+        "pkg:cargo/fsql-sqlparser"
+      ],
+      "versioning": "workspace",
+      "required": [
+        "pkg:cargo/fsql-cli",
+        "pkg:cargo/fsql",
+        "pkg:cargo/fsql-sqlparser"
+      ],
+      "credentials": ["crates-io"],
+      "prepare": {
+        "strategy": "managed",
+        "workflow": {
+          "file": "release-fsql.yml",
+          "ref": "master",
+          "inputs": {
+            "beepboop_operation": "prepare"
+          }
+        }
+      },
+      "promote": {
+        "approval": "push",
+        "workflow": {
+          "file": "release-fsql.yml",
+          "ref": "master",
+          "publications": [
+            "pkg:cargo/fsql-cli",
+            "pkg:cargo/fsql",
+            "pkg:cargo/fsql-sqlparser",
+            "github-release:kjanat/fsql"
+          ],
+          "refs": {
+            "phase": "version",
+            "prefix": "v"
+          },
+          "inputs": {
+            "beepboop_operation": "publish"
+          }
+        }
+      }
+    }
+  },
+  "managers": ["cargo", "github-release", "workflow"]
+}
