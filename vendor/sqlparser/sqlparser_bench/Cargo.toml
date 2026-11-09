@@ -22,12 +22,14 @@ authors     = ["Dandandan <danielheres@gmail.com>"]
 edition     = "2018"
 description = "Benchmarks for sqlparser"
 
+[workspace]
+
 [[bench]]
 harness = false
 name    = "sqlparser_bench"
 
 [dependencies]
-sqlparser = { path = "../" }
+sqlparser = { package = "fsql-sqlparser", path = "../" }
 
 [dev-dependencies]
 criterion = "0.8"

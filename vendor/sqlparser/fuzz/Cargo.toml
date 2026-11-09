@@ -79,7 +79,7 @@ libfuzzer-sys  = "0.4"
 libsqlite3-sys = { version = "0.38", features = ["bundled"], optional = true }
 pg_query       = { version = "6.2", optional = true }
 serde_json     = { version = "1", optional = true }
-sqlparser      = { path = ".." }
+sqlparser      = { package = "fsql-sqlparser", path = ".." }
 
 # The oracle targets build their engines from source, so each compiles only when its feature is on.
 [features]

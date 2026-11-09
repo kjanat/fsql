@@ -57,81 +57,6 @@ pub use self::spark::SparkSqlDialect;
 pub use self::sqlite::SQLiteDialect;
 pub use self::teradata::TeradataDialect;
 
-/// Macro for streamlining the creation of derived `Dialect` objects.
-/// The generated struct includes `new()` and `default()` constructors.
-/// Requires the `derive-dialect` feature.
-///
-/// # Syntax
-///
-/// ```text
-/// derive_dialect!(NewDialect, BaseDialect);
-/// derive_dialect!(NewDialect, BaseDialect, overrides = { method = value, ... });
-/// derive_dialect!(NewDialect, BaseDialect, preserve_type_id = true);
-/// derive_dialect!(NewDialect, BaseDialect, preserve_type_id = true, overrides = { ... });
-/// ```
-///
-/// # Example
-///
-/// ```
-/// use sqlparser::derive_dialect;
-/// use sqlparser::dialect::{Dialect, GenericDialect};
-///
-/// // Override boolean methods (supports_*, allow_*, etc.)
-/// derive_dialect!(CustomDialect, GenericDialect, overrides = {
-///     supports_order_by_all = true,
-///     supports_nested_comments = true,
-/// });
-///
-/// let dialect = CustomDialect::new();
-/// assert!(dialect.supports_order_by_all());
-/// assert!(dialect.supports_nested_comments());
-/// ```
-///
-/// # Overriding `identifier_quote_style`
-///
-/// Use a char literal or `None`:
-/// ```
-/// use sqlparser::derive_dialect;
-/// use sqlparser::dialect::{Dialect, PostgreSqlDialect};
-///
-/// derive_dialect!(BacktickPostgreSqlDialect, PostgreSqlDialect,
-///     preserve_type_id = true,
-///     overrides = { identifier_quote_style = '`' }
-/// );
-/// let d: &dyn Dialect = &BacktickPostgreSqlDialect::new();
-/// assert_eq!(d.identifier_quote_style("foo"), Some('`'));
-///
-/// derive_dialect!(QuotelessPostgreSqlDialect, PostgreSqlDialect,
-///     preserve_type_id = true,
-///     overrides = { identifier_quote_style = None }
-/// );
-/// let d: &dyn Dialect = &QuotelessPostgreSqlDialect::new();
-/// assert_eq!(d.identifier_quote_style("foo"), None);
-/// ```
-///
-/// # Type Identity
-///
-/// By default, derived dialects have their own `TypeId`. Set `preserve_type_id = true` to
-/// retain the base dialect's identity with respect to the parser's `dialect.is::<T>()` checks:
-/// ```
-/// use sqlparser::derive_dialect;
-/// use sqlparser::dialect::{Dialect, GenericDialect};
-///
-/// derive_dialect!(EnhancedGenericDialect, GenericDialect,
-///     preserve_type_id = true,
-///     overrides = {
-///         supports_order_by_all = true,
-///         supports_nested_comments = true,
-///     }
-/// );
-/// let d: &dyn Dialect = &EnhancedGenericDialect::new();
-/// assert!(d.is::<GenericDialect>());  // still recognized as a GenericDialect
-/// assert!(d.supports_nested_comments());
-/// assert!(d.supports_order_by_all());
-/// ```
-#[cfg(feature = "derive-dialect")]
-pub use sqlparser_derive::derive_dialect;
-
 use crate::ast::{ColumnOption, Expr, GranteesType, Ident, ObjectNamePart, Statement};
 pub use crate::keywords;
 use crate::keywords::Keyword;
@@ -2138,27 +2063,6 @@ mod tests {
 
     fn parse_dialect(v: &str) -> Box<dyn Dialect> {
         dialect_from_str(v).unwrap()
-    }
-
-    #[test]
-    #[cfg(feature = "derive-dialect")]
-    fn test_dialect_override() {
-        derive_dialect!(EnhancedGenericDialect, GenericDialect,
-            preserve_type_id = true,
-            overrides = {
-                supports_order_by_all = true,
-                supports_nested_comments = true,
-                supports_triple_quoted_string = true,
-            },
-        );
-        let dialect = EnhancedGenericDialect::new();
-
-        assert!(dialect.supports_order_by_all());
-        assert!(dialect.supports_nested_comments());
-        assert!(dialect.supports_triple_quoted_string());
-
-        let d: &dyn Dialect = &dialect;
-        assert!(d.is::<GenericDialect>());
     }
 
     #[test]

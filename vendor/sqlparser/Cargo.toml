@@ -34,15 +34,11 @@ include              = [
 
 [package.metadata.docs.rs]
 # Document these features on docs.rs
-features = ["serde", "visitor", "derive-dialect"]
+features = ["serde", "visitor"]
 
 [lib]
 name = "sqlparser"
 path = "src/lib.rs"
-
-[[test]]
-name              = "sqlparser_derive_dialect"
-required-features = ["derive-dialect"]
 
 [dependencies]
 bigdecimal = { version = "0.4.1", features = ["serde"], optional = true }
@@ -63,7 +59,6 @@ simple_logger     = "5.0"
 
 [features]
 default              = ["recursive-protection", "std"]
-derive-dialect       = ["sqlparser_derive"]
 # Enable JSON output in the `cli` example:
 json_example         = ["serde", "serde_json"]
 recursive-protection = ["recursive", "std"]

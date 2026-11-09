@@ -12,6 +12,10 @@ License: Apache-2.0, in [`sqlparser/LICENSE.TXT`]
 
 `derive/Cargo.toml` sets `publish = false`. The root workspace follows that path dependency, and the published `fsql-sqlparser` crate depends on crates.io `sqlparser_derive` 0.6.0.
 
+`Cargo.toml`, `src/lib.rs` and `src/dialect/mod.rs` drop the `derive-dialect` feature, the `derive_dialect!` re-export and its tests. `sqlparser_derive` 0.6.0 locates the parser source by searching the registry for a `sqlparser-*` directory, and finds no `fsql-sqlparser` package.
+
+`fuzz/Cargo.toml` and `sqlparser_bench/Cargo.toml` name the parser dependency `package = "fsql-sqlparser"`. `sqlparser_bench/Cargo.toml` declares its own `[workspace]`, like `fuzz/Cargo.toml`.
+
 `src/dialect/mod.rs`
 
 - `Dialect::supports_byte_unit_suffixes` defaults to `false`.
