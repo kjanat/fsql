@@ -5,9 +5,9 @@ members  = ["crates/*", "editors/zed/", "vendor/sqlparser"]
 [workspace.package]
 version    = "0.1.0"
 edition    = "2024"
+readme     = "README.md"
 repository = "https://github.com/kjanat/fsql"
 license    = "MIT"
-readme     = "README.md"
 
 [workspace.dependencies]
 fsql      = { path = "crates/fsql", version = "0.1.0" }
