@@ -1902,12 +1902,12 @@ impl<'a> Parser<'a> {
                     Err(e) => {
                         self.failed_reserved_word_prefix_positions
                             .insert(next_token_index, (&e).into());
-                        if !self.dialect.is_reserved_for_identifier(w.keyword) {
-                            if let Ok(Some(expr)) = self.maybe_parse(|parser| {
+                        if !self.dialect.is_reserved_for_identifier(w.keyword)
+                            && let Ok(Some(expr)) = self.maybe_parse(|parser| {
                                 parser.parse_expr_prefix_by_unreserved_word(&w, span)
-                            }) {
-                                return Ok(expr);
-                            }
+                            })
+                        {
+                            return Ok(expr);
                         }
                         return Err(e);
                     }
@@ -3111,10 +3111,10 @@ impl<'a> Parser<'a> {
     pub fn parse_trim_expr(&mut self) -> Result<Expr, ParserError> {
         self.expect_token(&Token::LParen)?;
         let mut trim_where = None;
-        if let Token::Word(word) = &self.peek_token_ref().token {
-            if [Keyword::BOTH, Keyword::LEADING, Keyword::TRAILING].contains(&word.keyword) {
-                trim_where = Some(self.parse_trim_where()?);
-            }
+        if let Token::Word(word) = &self.peek_token_ref().token
+            && [Keyword::BOTH, Keyword::LEADING, Keyword::TRAILING].contains(&word.keyword)
+        {
+            trim_where = Some(self.parse_trim_where()?);
         }
         if self.dialect.supports_comma_separated_trim() && self.parse_keyword(Keyword::FROM) {
             let expr = self.parse_expr()?;
@@ -5630,10 +5630,10 @@ impl<'a> Parser<'a> {
         if self.parse_keyword(Keyword::TABLE) {
             let table_name = self.parse_object_name(false)?;
             if self.peek_token_ref().token != Token::EOF {
-                if let Token::Word(word) = &self.peek_token_ref().token {
-                    if word.keyword == Keyword::OPTIONS {
-                        options = self.parse_options(Keyword::OPTIONS)?
-                    }
+                if let Token::Word(word) = &self.peek_token_ref().token
+                    && word.keyword == Keyword::OPTIONS
+                {
+                    options = self.parse_options(Keyword::OPTIONS)?
                 };
 
                 if self.peek_token_ref().token != Token::EOF {
@@ -5663,10 +5663,10 @@ impl<'a> Parser<'a> {
             if self.parse_keyword(Keyword::TABLE) {
                 let table_name = self.parse_object_name(false)?;
                 if self.peek_token_ref().token != Token::EOF {
-                    if let Token::Word(word) = &self.peek_token_ref().token {
-                        if word.keyword == Keyword::OPTIONS {
-                            options = self.parse_options(Keyword::OPTIONS)?
-                        }
+                    if let Token::Word(word) = &self.peek_token_ref().token
+                        && word.keyword == Keyword::OPTIONS
+                    {
+                        options = self.parse_options(Keyword::OPTIONS)?
                     };
 
                     if self.peek_token_ref().token != Token::EOF {
@@ -6884,12 +6884,11 @@ impl<'a> Parser<'a> {
             vec![]
         };
 
-        if dialect_of!(self is BigQueryDialect | GenericDialect) {
-            if let Some(opts) = self.maybe_parse_options(Keyword::OPTIONS)? {
-                if !opts.is_empty() {
-                    options = CreateTableOptions::Options(opts);
-                }
-            };
+        if dialect_of!(self is BigQueryDialect | GenericDialect)
+            && let Some(opts) = self.maybe_parse_options(Keyword::OPTIONS)?
+            && !opts.is_empty()
+        {
+            options = CreateTableOptions::Options(opts);
         }
 
         let to = if dialect_of!(self is ClickHouseDialect | GenericDialect)
@@ -9216,11 +9215,10 @@ impl<'a> Parser<'a> {
                 ));
             };
 
-            if let Token::Word(word) = &self.peek_token_ref().token {
-                if word.keyword == Keyword::OPTIONS {
-                    table_options =
-                        CreateTableOptions::Options(self.parse_options(Keyword::OPTIONS)?)
-                }
+            if let Token::Word(word) = &self.peek_token_ref().token
+                && word.keyword == Keyword::OPTIONS
+            {
+                table_options = CreateTableOptions::Options(self.parse_options(Keyword::OPTIONS)?)
             };
         }
 
@@ -10478,10 +10476,10 @@ impl<'a> Parser<'a> {
         &mut self,
         keyword: Keyword,
     ) -> Result<Option<Vec<SqlOption>>, ParserError> {
-        if let Token::Word(word) = &self.peek_token_ref().token {
-            if word.keyword == keyword {
-                return Ok(Some(self.parse_options(keyword)?));
-            }
+        if let Token::Word(word) = &self.peek_token_ref().token
+            && word.keyword == keyword
+        {
+            return Ok(Some(self.parse_options(keyword)?));
         };
         Ok(None)
     }
@@ -12510,10 +12508,10 @@ impl<'a> Parser<'a> {
                     if self.consume_token(&Token::Period) {
                         return values;
                     }
-                    if let Token::Word(w) = self.next_token().token {
-                        if w.value == "N" {
-                            values.push(None);
-                        }
+                    if let Token::Word(w) = self.next_token().token
+                        && w.value == "N"
+                    {
+                        values.push(None);
                     }
                 }
                 _ => {
@@ -15210,30 +15208,31 @@ impl<'a> Parser<'a> {
         let as_optional = self.dialect.supports_cte_without_as();
 
         // If AS is optional, first try to parse `name (query)` directly
-        if as_optional && !self.peek_keyword(Keyword::AS) {
-            if let Some((query, closing_paren_token)) = self.maybe_parse(|p| {
+        if as_optional
+            && !self.peek_keyword(Keyword::AS)
+            && let Some((query, closing_paren_token)) = self.maybe_parse(|p| {
                 p.expect_token(&Token::LParen)?;
                 let query = p.parse_query()?;
                 let closing_paren_token = p.expect_token(&Token::RParen)?;
                 Ok((query, closing_paren_token))
-            })? {
-                let mut cte = Cte {
-                    alias: TableAlias {
-                        explicit: false,
-                        name,
-                        columns: vec![],
-                        at: None,
-                    },
-                    query,
-                    from: None,
-                    materialized: None,
-                    closing_paren_token: closing_paren_token.into(),
-                };
-                if self.parse_keyword(Keyword::FROM) {
-                    cte.from = Some(self.parse_identifier()?);
-                }
-                return Ok(cte);
+            })?
+        {
+            let mut cte = Cte {
+                alias: TableAlias {
+                    explicit: false,
+                    name,
+                    columns: vec![],
+                    at: None,
+                },
+                query,
+                from: None,
+                materialized: None,
+                closing_paren_token: closing_paren_token.into(),
+            };
+            if self.parse_keyword(Keyword::FROM) {
+                cte.from = Some(self.parse_identifier()?);
             }
+            return Ok(cte);
         }
 
         // Determine column definitions and consume AS
@@ -16934,10 +16933,10 @@ impl<'a> Parser<'a> {
             let with_ordinality = self.parse_keywords(&[Keyword::WITH, Keyword::ORDINALITY]);
 
             let mut sample = None;
-            if self.dialect.supports_table_sample_before_alias() {
-                if let Some(parsed_sample) = self.maybe_parse_table_sample()? {
-                    sample = Some(TableSampleKind::BeforeTableAlias(parsed_sample));
-                }
+            if self.dialect.supports_table_sample_before_alias()
+                && let Some(parsed_sample) = self.maybe_parse_table_sample()?
+            {
+                sample = Some(TableSampleKind::BeforeTableAlias(parsed_sample));
             }
 
             let alias = self.maybe_parse_table_alias()?;
@@ -16962,10 +16961,10 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            if !self.dialect.supports_table_sample_before_alias() {
-                if let Some(parsed_sample) = self.maybe_parse_table_sample()? {
-                    sample = Some(TableSampleKind::AfterTableAlias(parsed_sample));
-                }
+            if !self.dialect.supports_table_sample_before_alias()
+                && let Some(parsed_sample) = self.maybe_parse_table_sample()?
+            {
+                sample = Some(TableSampleKind::AfterTableAlias(parsed_sample));
             }
 
             let mut table = TableFactor::Table {
@@ -19033,17 +19032,16 @@ impl<'a> Parser<'a> {
         if self.dialect.supports_named_fn_args_with_expr_name() {
             let expr = self.parse_wildcard_expr()?;
             // A wildcard is never a named-arg name; only the unnamed form applies.
-            if !matches!(expr, Expr::Wildcard(_) | Expr::QualifiedWildcard(..)) {
-                if let Some(operator) =
+            if !matches!(expr, Expr::Wildcard(_) | Expr::QualifiedWildcard(..))
+                && let Some(operator) =
                     self.maybe_parse(|p| p.parse_function_named_arg_operator())?
-                {
-                    let arg = self.parse_wildcard_expr()?.into();
-                    return Ok(FunctionArg::ExprNamed {
-                        name: expr,
-                        arg,
-                        operator,
-                    });
-                }
+            {
+                let arg = self.parse_wildcard_expr()?.into();
+                return Ok(FunctionArg::ExprNamed {
+                    name: expr,
+                    arg,
+                    operator,
+                });
             }
             let arg_expr = self.function_arg_expr_from_wildcard(expr)?;
             return Ok(FunctionArg::Unnamed(
@@ -19215,10 +19213,10 @@ impl<'a> Parser<'a> {
             clauses.push(FunctionArgumentClause::Where(self.parse_expr()?));
         }
 
-        if self.dialect.supports_window_function_null_treatment_arg() {
-            if let Some(null_treatment) = self.parse_null_treatment()? {
-                clauses.push(FunctionArgumentClause::IgnoreOrRespectNulls(null_treatment));
-            }
+        if self.dialect.supports_window_function_null_treatment_arg()
+            && let Some(null_treatment) = self.parse_null_treatment()?
+        {
+            clauses.push(FunctionArgumentClause::IgnoreOrRespectNulls(null_treatment));
         }
 
         if self.parse_keywords(&[Keyword::ORDER, Keyword::BY]) {

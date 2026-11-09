@@ -78,13 +78,11 @@ impl TestedDialects {
             parser
         };
 
-        let parser = if let Some(recursion_limit) = &self.recursion_limit {
+        if let Some(recursion_limit) = &self.recursion_limit {
             parser.with_recursion_limit(*recursion_limit)
         } else {
             parser
-        };
-
-        parser
+        }
     }
 
     /// Run the given function for all of `self.dialects`, assert that they

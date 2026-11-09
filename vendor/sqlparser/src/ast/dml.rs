@@ -208,11 +208,11 @@ impl Display for Insert {
             SpaceOrNewline.fmt(f)?;
         }
 
-        if let Some(ref parts) = self.partitioned {
-            if !parts.is_empty() {
-                write!(f, "PARTITION ({})", display_comma_separated(parts))?;
-                SpaceOrNewline.fmt(f)?;
-            }
+        if let Some(ref parts) = self.partitioned
+            && !parts.is_empty()
+        {
+            write!(f, "PARTITION ({})", display_comma_separated(parts))?;
+            SpaceOrNewline.fmt(f)?;
         }
 
         if self.by_name {
@@ -273,10 +273,10 @@ impl Display for Insert {
         if let Some(insert_alias) = &self.insert_alias {
             write!(f, " AS {0}", insert_alias.row_alias)?;
 
-            if let Some(col_aliases) = &insert_alias.col_aliases {
-                if !col_aliases.is_empty() {
-                    write!(f, " ({})", display_comma_separated(col_aliases))?;
-                }
+            if let Some(col_aliases) = &insert_alias.col_aliases
+                && !col_aliases.is_empty()
+            {
+                write!(f, " ({})", display_comma_separated(col_aliases))?;
             }
         }
 

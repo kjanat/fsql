@@ -3268,10 +3268,10 @@ impl fmt::Display for CreateTable {
                     display_comma_separated(serde_properties)
                 )?;
             }
-            if !self.external {
-                if let Some(loc) = location {
-                    write!(f, " LOCATION '{loc}'")?;
-                }
+            if !self.external
+                && let Some(loc) = location
+            {
+                write!(f, " LOCATION '{loc}'")?;
             }
         }
         if self.external {
@@ -3319,10 +3319,10 @@ impl fmt::Display for CreateTable {
             write!(f, " CATALOG='{catalog}'")?;
         }
 
-        if self.iceberg {
-            if let Some(base_location) = self.base_location.as_ref() {
-                write!(f, " BASE_LOCATION='{base_location}'")?;
-            }
+        if self.iceberg
+            && let Some(base_location) = self.base_location.as_ref()
+        {
+            write!(f, " BASE_LOCATION='{base_location}'")?;
         }
 
         if let Some(catalog_sync) = self.catalog_sync.as_ref() {
@@ -4316,10 +4316,10 @@ impl fmt::Display for Truncate {
             }
         }
 
-        if let Some(parts) = &self.partitions {
-            if !parts.is_empty() {
-                write!(f, " PARTITION ({})", display_comma_separated(parts))?;
-            }
+        if let Some(parts) = &self.partitions
+            && !parts.is_empty()
+        {
+            write!(f, " PARTITION ({})", display_comma_separated(parts))?;
         }
         if let Some(on_cluster) = &self.on_cluster {
             write!(f, " ON CLUSTER {on_cluster}")?;

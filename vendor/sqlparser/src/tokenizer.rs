@@ -1410,10 +1410,11 @@ impl<'a> Tokenizer<'a> {
                     // If so, what follows is definitely not part of a decimal number and
                     // we should yield the dot as a dedicated token so compound identifiers
                     // starting with digits can be parsed correctly.
-                    if s == "." && self.dialect.supports_numeric_prefix() {
-                        if let Some(Token::Word(_)) = prev_token {
-                            return Ok(Some(Token::Period));
-                        }
+                    if s == "."
+                        && self.dialect.supports_numeric_prefix()
+                        && let Some(Token::Word(_)) = prev_token
+                    {
+                        return Ok(Some(Token::Period));
                     }
 
                     // Consume fractional digits.
@@ -1479,21 +1480,20 @@ impl<'a> Tokenizer<'a> {
                         }
                     }
 
-                    if self.dialect.supports_byte_unit_suffixes() {
-                        if let Some((suffix_len, multiplier)) =
+                    if self.dialect.supports_byte_unit_suffixes()
+                        && let Some((suffix_len, multiplier)) =
                             numeric_literals::peek_byte_unit_suffix(chars)
-                        {
-                            for _ in 0..suffix_len {
-                                chars.next();
-                            }
-                            return match numeric_literals::scale_by_byte_unit(&s, multiplier) {
-                                Some(scaled) => Ok(Some(Token::Number(scaled, false))),
-                                None => self.tokenizer_error(
-                                    literal_start,
-                                    format!("Byte size literal out of range: {s}"),
-                                ),
-                            };
+                    {
+                        for _ in 0..suffix_len {
+                            chars.next();
                         }
+                        return match numeric_literals::scale_by_byte_unit(&s, multiplier) {
+                            Some(scaled) => Ok(Some(Token::Number(scaled, false))),
+                            None => self.tokenizer_error(
+                                literal_start,
+                                format!("Byte size literal out of range: {s}"),
+                            ),
+                        };
                     }
 
                     let long = if chars.peek() == Some(&'L') {
@@ -2265,15 +2265,15 @@ impl<'a> Tokenizer<'a> {
         // read the string literal until the "quote character" following a by literal quote
         let mut value = String::new();
         while let Some(ch) = chars.next() {
-            if ch == end_quote {
-                if let Some('\'') = chars.peek() {
-                    chars.next(); // ~ consume the quote
-                    return Ok(QuoteDelimitedString {
-                        start_quote,
-                        value,
-                        end_quote,
-                    });
-                }
+            if ch == end_quote
+                && let Some('\'') = chars.peek()
+            {
+                chars.next(); // ~ consume the quote
+                return Ok(QuoteDelimitedString {
+                    start_quote,
+                    value,
+                    end_quote,
+                });
             }
             value.push(ch);
         }

@@ -391,10 +391,10 @@ impl MsSqlDialect {
             if let Token::EOF = parser.peek_token_ref().token {
                 break;
             }
-            if let Some(term) = terminal_keyword {
-                if parser.peek_keyword(term) {
-                    break;
-                }
+            if let Some(term) = terminal_keyword
+                && parser.peek_keyword(term)
+            {
+                break;
             }
             stmts.push(parser.parse_statement()?);
             while let Token::SemiColon = parser.peek_token_ref().token {

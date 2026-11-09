@@ -2685,10 +2685,10 @@ impl fmt::Display for CaseStatement {
 
         write!(f, " END")?;
 
-        if let Token::Word(w) = &end.token {
-            if w.keyword == Keyword::CASE {
-                write!(f, " CASE")?;
-            }
+        if let Token::Word(w) = &end.token
+            && w.keyword == Keyword::CASE
+        {
+            write!(f, " CASE")?;
         }
 
         Ok(())
@@ -3574,10 +3574,10 @@ impl fmt::Display for Analyze {
         if !self.for_columns && !self.columns.is_empty() {
             write!(f, " ({})", display_comma_separated(&self.columns))?;
         }
-        if let Some(ref parts) = self.partitions {
-            if !parts.is_empty() {
-                write!(f, " PARTITION ({})", display_comma_separated(parts))?;
-            }
+        if let Some(ref parts) = self.partitions
+            && !parts.is_empty()
+        {
+            write!(f, " PARTITION ({})", display_comma_separated(parts))?;
         }
         if self.compute_statistics {
             write!(f, " COMPUTE STATISTICS")?;
@@ -5537,10 +5537,10 @@ impl fmt::Display for Statement {
                     name = name
                 )?;
 
-                if let Some(p) = params {
-                    if !p.is_empty() {
-                        write!(f, " ({})", display_comma_separated(p))?;
-                    }
+                if let Some(p) = params
+                    && !p.is_empty()
+                {
+                    write!(f, " ({})", display_comma_separated(p))?;
                 }
 
                 if let Some(language) = language {
@@ -5589,10 +5589,10 @@ impl fmt::Display for Statement {
                     overwrite = if *overwrite { "OVERWRITE " } else { "" },
                     table_name = table_name,
                 )?;
-                if let Some(parts) = &partitioned {
-                    if !parts.is_empty() {
-                        write!(f, " PARTITION ({})", display_comma_separated(parts))?;
-                    }
+                if let Some(parts) = &partitioned
+                    && !parts.is_empty()
+                {
+                    write!(f, " PARTITION ({})", display_comma_separated(parts))?;
                 }
                 if let Some(HiveLoadDataFormat {
                     serde,

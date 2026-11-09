@@ -530,21 +530,21 @@ impl fmt::Display for Select {
             value_table_mode.fmt(f)?;
         }
 
-        if let Some(ref top) = self.top {
-            if self.top_before_distinct {
-                f.write_str(" ")?;
-                top.fmt(f)?;
-            }
+        if let Some(ref top) = self.top
+            && self.top_before_distinct
+        {
+            f.write_str(" ")?;
+            top.fmt(f)?;
         }
         if let Some(ref distinct) = self.distinct {
             f.write_str(" ")?;
             distinct.fmt(f)?;
         }
-        if let Some(ref top) = self.top {
-            if !self.top_before_distinct {
-                f.write_str(" ")?;
-                top.fmt(f)?;
-            }
+        if let Some(ref top) = self.top
+            && !self.top_before_distinct
+        {
+            f.write_str(" ")?;
+            top.fmt(f)?;
         }
 
         if let Some(ref select_modifiers) = self.select_modifiers {

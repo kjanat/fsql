@@ -28,7 +28,7 @@ License: Apache-2.0, in [`sqlparser/LICENSE.TXT`]
 - Both extensions preserve spans over the original source text, report errors at the literal's start, and leave quoted strings, identifiers, and comments untouched. Both are off by default, and a dialect can enable each one on its own.
 - Local helpers and regression tests live in `numeric_literals.rs`. Upstream tokenizer edits touch only the integration points.
 
-The local crate uses Rust edition 2024 and omits `ref` binding modifiers that the edition rejects. Unpatched upstream files keep their original formatting and contents. `dprint.toml` excludes `vendor/*/**`, and the vendor-local `.rustfmt.toml` sets upstream's Rust 2021 style separately from the project config. The copy keeps upstream license notices, including `NOTICE.TXT`.
+The local crate uses Rust edition 2024 and omits `ref` binding modifiers that the edition rejects. `cargo clippy --fix` collapses nested `if` blocks into let chains in `src/ast/`, `src/dialect/mssql.rs`, `src/parser/mod.rs`, `src/test_utils.rs` and `src/tokenizer.rs`; repeat it after re-vendoring. Other upstream files keep their original formatting and contents. `dprint.toml` excludes `vendor/*/**`, and the vendor-local `.rustfmt.toml` sets upstream's Rust 2021 style separately from the project config. The copy keeps upstream license notices, including `NOTICE.TXT`.
 
 ### Omitted upstream files
 
