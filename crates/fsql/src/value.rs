@@ -24,8 +24,9 @@ pub enum Type {
     Timestamp,
 }
 
-/// Canonical SQL grouping identity. NULLs and NaNs each form one group;
-/// numerically equal integers and floats share a key, as do text and bytes.
+/// Hash key for grouping and de-duplication. All NULLs share one key and all
+/// NaNs share one key. Numerically equal integers and floats share a key, and
+/// so do text and bytes with the same content.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ValueKey {
     Null,

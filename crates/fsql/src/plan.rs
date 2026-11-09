@@ -24,7 +24,10 @@ pub struct Source {
 }
 
 impl Source {
-    /// Derive an internal scan root while retaining the public source boundary.
+    /// Build a walker for this source. For the `files` table without
+    /// `one_filesystem`, it starts at a deeper root when the filter confines
+    /// matches to a subdirectory, and keeps the source root as the boundary for
+    /// relative paths.
     pub(crate) fn walker(
         &self,
         filter: Option<&Expr>,

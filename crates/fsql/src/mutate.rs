@@ -121,9 +121,9 @@ impl Resolved {
 pub struct Outcome {
     pub applied: usize,
     pub failures: Vec<(PathBuf, Error)>,
-    /// Entries changed before a later step failed.
+    /// Entries that were changed before a later step on them failed.
     pub partial: Vec<PathBuf>,
-    /// Journals retaining unfinished durable intents.
+    /// Journal directories that still hold unfinished intents.
     pub recovery_required: Vec<PathBuf>,
 }
 

@@ -1,27 +1,27 @@
 # Upstream source
 
-Copied from [Derek Stride (@DerekStride)]'s [`tree-sitter-sql`] at commit `97614d051eebfd3bc5d97c0bdb5a1638719ca811` (package version 0.3.11). The upstream MIT license and copyright notice are retained in [`LICENSE`].
+This directory copies [Derek Stride (@DerekStride)]'s [`tree-sitter-sql`] at commit `97614d051eebfd3bc5d97c0bdb5a1638719ca811`, package version 0.3.11. [`LICENSE`] keeps the upstream MIT license and copyright notice.
 
-Copied inputs: `grammar.js`, `grammar/`, `src/scanner.c`, `queries/`, and selected `test/corpus/` cases. Packaging, documentation, examples, and fsql-specific tests are local. The generated parser is produced with tree-sitter CLI 0.27.0, ABI 15.
+The copied inputs are `grammar.js`, `grammar/`, `src/scanner.c`, `queries/`, and selected `test/corpus/` cases. Packaging, documentation, examples, and fsql-specific tests are local additions. tree-sitter CLI 0.27.0 generates the parser with ABI 15.
 
 ## Local adaptations
 
 - Name and scanner symbols changed from `sql` to `fsql`.
-- fsql rules are overlaid in `grammar.js`. Copied modules have JSDoc types for strict JavaScript checking; identical duplicate keywords are removed and helper signatures describe their existing optional arguments.
-- Callbacks take `$` only when using grammar symbols; other callbacks take no arguments. Helpers and equivalent regex syntax are simplified without changing the parser.
-- Binary/decimal byte suffixes, GLOB/MATCH, XOR and interval units are recognized.
-- Entry points are restricted to SELECT, INSERT, UPDATE, DELETE and VALUES.
-- SELECT without FROM accepts clauses; DELETE accepts relation aliases; UPDATE accepts ORDER BY/LIMIT; INTERSECT/EXCEPT accept ALL or DISTINCT.
-- Empty statements and an optional final semicolon are allowed.
-- Highlight queries recognize numeric literals using tree-sitter's regex syntax.
-- Queries omit unreachable DDL/procedural nodes. The retained corpus covers expressions, literals, comments, casts, CTEs, joins, subqueries, grouping, windows and mutations. DDL, COPY, SELECT INTO, and nonstandard parenthesized WITH headers are omitted; DELETE trees gain the relation wrapper.
-- The package detects `.fsql` files as `source.fsql`; it does not take over `.sql`.
+- `grammar.js` overlays the fsql rules. The copied modules have JSDoc types for strict JavaScript checking. The copy drops identical duplicate keywords, and helper signatures document the optional arguments the helpers already took.
+- Callbacks take `$` only when they use grammar symbols and take no arguments otherwise. The helpers are simpler and the regexes use equivalent, simpler syntax. These edits leave the generated parser unchanged.
+- The grammar recognizes binary and decimal byte suffixes, GLOB, MATCH, XOR and interval units.
+- Entry points are SELECT, INSERT, UPDATE, DELETE and VALUES.
+- SELECT without FROM accepts clauses. DELETE accepts relation aliases. UPDATE accepts ORDER BY and LIMIT. INTERSECT and EXCEPT accept ALL or DISTINCT.
+- The grammar allows empty statements and an optional final semicolon.
+- Highlight queries recognize numeric literals with tree-sitter's regex syntax.
+- The queries omit unreachable DDL and procedural nodes. The retained corpus covers expressions, literals, comments, casts, CTEs, joins, subqueries, grouping, windows and mutations. It omits DDL, COPY, SELECT INTO, and nonstandard parenthesized WITH headers, and DELETE trees gain the relation wrapper.
+- The package detects `.fsql` files as `source.fsql` and ignores `.sql` files.
 
-This is intentionally a permissive SQL grammar. Expression and query syntax inherited from upstream may parse successfully even though fsql cannot execute it (for example, window functions). DDL and procedural statements are excluded. The Rust planner and evaluator remain the authority on supported queries and mutations.
+The grammar is deliberately permissive. Expression and query syntax from upstream can parse even when fsql cannot execute it. Window functions are one example. The grammar excludes DDL and procedural statements. The Rust planner and evaluator decide which queries and mutations fsql supports.
 
 ## Updating the copy
 
-Fetch a pinned upstream archive and compare the copied inputs, preserving the local overlays, scanner symbol rename, queries, and tests. Update this commit reference, regenerate the parser, and run the corpus and example checks. Do not replace fsql-specific additions with an unreviewed upstream snapshot.
+Fetch a pinned upstream archive and compare the copied inputs. Keep the local overlays, scanner symbol rename, queries, and tests. Update this commit reference, regenerate the parser, and run the corpus and example checks. Review every upstream change before it replaces an fsql-specific addition.
 
 [Derek Stride (@DerekStride)]: https://github.com/DerekStride
 [`tree-sitter-sql`]: https://github.com/DerekStride/tree-sitter-sql/tree/97614d051eebfd3bc5d97c0bdb5a1638719ca811

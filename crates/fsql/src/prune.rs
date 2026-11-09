@@ -1,4 +1,5 @@
-//! Conservative proofs that a single source's descendants cannot match.
+//! Conservative proofs that no descendant of a directory can match a
+//! single-source filter. The walk skips the descendants that a proof covers.
 use globset::GlobSet;
 use sqlparser::ast::{BinaryOperator, Expr};
 use std::path::Path;
@@ -42,8 +43,10 @@ impl Pruning {
     }
 }
 
-/// Only mandatory negative predicates can prove that descendants are excluded.
-/// In particular, never infer pruning from a directory failing a row predicate.
+/// Collects subtree prefixes from mandatory `NOT relative_path GLOB`
+/// predicates. Only these negative predicates can prove that descendants are
+/// excluded. A directory that fails some other row predicate never proves
+/// anything about its descendants.
 fn subtree_exclusions(
     expr: &Expr,
     alias: &str,
@@ -118,9 +121,10 @@ fn subtree_exclusions(
     true
 }
 
-/// Intentionally narrow proof: depth is available without metadata I/O and
-/// comparison with a representable integer cannot fail. In particular, kind
-/// may need a stat on filesystems without directory-entry type hints.
+/// Returns true when evaluating `expr` cannot fail: a boolean or NULL literal,
+/// or a comparison of `depth` with an integer literal. The check leaves out
+/// `kind`, which may need a stat call on filesystems without directory-entry
+/// type hints.
 fn infallible_guard(expr: &Expr, alias: &str) -> bool {
     use crate::expr::unnest;
     use sqlparser::ast::Value;

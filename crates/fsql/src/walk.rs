@@ -31,11 +31,12 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
 pub struct WalkOptions {
     pub max_depth: Option<u32>,
     pub one_filesystem: bool,
-    /// Offset applied to reported depths; does not change the source-relative path.
+    /// Added to every reported depth. The source-relative path stays the same.
     pub initial_depth: u32,
 }
 
-/// Private recovery directories reserve `.fsql-<hex>-<hex>-<decimal>` names.
+/// Matches the `.fsql-<hex>-<hex>-<decimal>` names that fsql reserves for its
+/// private recovery directories.
 pub(crate) fn recovery_name(name: &std::ffi::OsStr) -> bool {
     let Some(suffix) = name.to_str().and_then(|s| s.strip_prefix(".fsql-")) else {
         return false;
@@ -90,7 +91,8 @@ pub fn open_chain(directory: &Path) -> Result<OwnedFd> {
     Ok(fd)
 }
 
-/// Mutation paths are absolute and contain no parent traversal components.
+/// Return an error unless the path is absolute and has no `..` component and
+/// no NUL byte.
 pub fn validate_path(path: &Path) -> Result<()> {
     if !path.is_absolute()
         || path

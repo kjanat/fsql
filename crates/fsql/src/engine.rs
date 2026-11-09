@@ -1,4 +1,4 @@
-//! Stable entry points with explicit execution and mutation policies.
+//! Entry points that take execution options and a mutation cap.
 use std::path::{Path, PathBuf};
 
 use crate::execution::{Completion, ExecutionOptions};
@@ -13,7 +13,8 @@ use crate::{Error, Result};
 pub struct Engine {
     planner: Planner,
     pub execution: ExecutionOptions,
-    /// Zero explicitly disables the mutation entry cap.
+    /// Maximum number of entries one mutation may touch. Zero removes the
+    /// limit.
     pub mutation_cap: usize,
 }
 impl Engine {
@@ -74,8 +75,9 @@ impl PreparedQuery {
     pub fn collect(&self) -> Result<(ResultSet, Completion)> {
         crate::exec::run_with_options(&self.plan, &self.planner, self.options.clone())
     }
-    /// Plain scans emit rows immediately. Blocking operators materialize within
-    /// the configured budgets. A break from the callback stops consumption.
+    /// Plain scans pass each row to `emit` as the scan reads it. Other queries
+    /// first collect their rows within the configured budgets. `emit` returns
+    /// `ControlFlow::Break` to stop the query.
     pub fn stream(&self, emit: &mut crate::exec::RowSink<'_>) -> Result<Completion> {
         crate::exec::stream(&self.plan, &self.planner, self.options.clone(), emit)
     }
@@ -100,7 +102,8 @@ impl ResolvedMutation {
         let outcome = mutate::apply(&self.resolved, Some(&mut journal))?;
         Ok((outcome, journal.id().to_owned()))
     }
-    /// Explicitly opt out of recovery records.
+    /// Apply without writing a journal. fsql cannot undo a statement applied
+    /// this way.
     pub fn apply_without_journal(self) -> Result<Outcome> {
         mutate::apply(&self.resolved, None)
     }

@@ -9,9 +9,9 @@
 
 Query with `SELECT`, change with `DELETE`, `UPDATE` and `INSERT`.
 
-Mutations preview by default, run only with `--apply`, and every applied statement is journaled so it can be undone.
+Mutations preview by default and run only with `--apply`. fsql journals every applied statement, and `fsql undo` reverses it.
 
-Find the largest files, with permissions, exact/readable sizes, and totals for the whole tree:
+Find the ten largest files with permissions, exact and readable sizes, and whole-tree totals:
 
 ```sh
 fsql -C ~/projects --from-file crates/fsql/examples/queries/largest-files.fsql
@@ -47,7 +47,7 @@ ORDER BY largest.size DESC, largest.path;
 
 </details>
 
-The [query file] keeps `size` numeric for sorting and uses `human(size)` only for presentation. More runnable reports cover [executables, permissions, duplicate sizes, and directory usage].
+The [query file] sorts on the numeric `size` and calls `human(size)` only for display. More runnable reports cover [executables, permissions, duplicate sizes, and directory usage].
 
 ```sh
 fsql -e "select path, human(size) from files where size > 1g order by size desc limit 20"
@@ -77,7 +77,7 @@ fsql -                # statements from stdin
 fsql <script.fsql     # same
 ```
 
-`--from-file` and the positional `FILE` are alternatives; use one per invocation. `-f` selects the output format (for example, `-f json`).
+`--from-file` and the positional `FILE` are alternatives; use one per invocation. `-f` selects the output format, for example `-f json`.
 
 `-C DIR` sets the directory the `files` table starts from. The default is the current directory. `files('/some/dir')` sets it per query.
 
@@ -88,7 +88,7 @@ For editor highlighting of `.fsql` query files, use the bundled [Zed extension] 
 
 ## Tables
 
-`files` has one row per directory entry below the root, the root included. Symbolic links are rows and are never followed.
+`files` has one row per directory entry below the root, the root included. Symbolic links appear as rows, and fsql never follows them.
 
 | column        | type      | source   |
 | ------------- | --------- | -------- |
@@ -123,7 +123,7 @@ For editor highlighting of `.fsql` query files, use the bundled [Zed extension] 
 
 `kind` is one of `file`, `dir`, `symlink`, `fifo`, `socket`, `block`, `char`.
 
-`relative_path` is relative to the root supplied to `files(...)` (or the default query root), uses `/` separators, and is empty for the root row. It keeps that meaning when a path predicate narrows the scan. Like `path`, it preserves non-UTF-8 filenames as byte values.
+`relative_path` is relative to the root given to `files(...)`, or to the default query root. It uses `/` separators and is empty for the root row. It keeps that meaning when a path predicate narrows the scan. Like `path`, it preserves non-UTF-8 filenames as byte values.
 
 `GLOB ANY (ARRAY[...])` matches at least one pattern, with the same brace expansion and separator semantics as `GLOB`:
 
@@ -139,19 +139,19 @@ WHERE kind IN ('file', 'symlink')
 
 `GLOB SOME` is an alias for `GLOB ANY`; `GLOB ALL` requires every pattern to match. Each accepts an array or a one-column subquery, including correlated subqueries. For example, `name GLOB ANY (SELECT pattern FROM patterns)` uses a query-defined pattern collection.
 
-Constant string arrays for `ANY`/`SOME` compile into a cached glob set without rebuilding pattern strings for each row. Dynamic array elements are evaluated for each row. Empty arrays/subqueries give false for `ANY` and true for `ALL`, even for a NULL subject. Otherwise NULL comparisons propagate unless a match decides `ANY` or a nonmatch decides `ALL`.
+Constant string arrays for `ANY`/`SOME` compile into a cached glob set without rebuilding pattern strings for each row. fsql evaluates dynamic array elements for each row. Empty arrays and empty subqueries give false for `ANY` and true for `ALL`, even for a NULL subject. Otherwise NULL comparisons propagate unless a match decides `ANY` or a nonmatch decides `ALL`.
 
-The public `WalkOptions` structure stays focused on traversal settings. Pruning is an internal scan policy. `Entry::relative_path()` exposes the original source-relative path without reconstructing it on every access. `SELECT *` appends `relative_path` after the existing columns to preserve their positions.
+The public `WalkOptions` struct holds only traversal settings. Pruning is an internal scan policy. `Entry::relative_path()` returns the original source-relative path without rebuilding it on every call. `SELECT *` appends `relative_path` after the other columns, and their positions stay the same.
 
-For a single `files` source, mandatory `NOT (relative_path GLOB ...)` and `NOT (relative_path GLOB ANY (...))` filters can prune traversal. The optimizer recognizes provable subtree patterns ending in `{,/**}` or `/**` and leaves ambiguous wildcard or escape cases to ordinary row filtering. Pruning also respects left-to-right `AND` evaluation: an exclusion cannot skip an earlier expression that might fail. Only proven infallible predecessors, such as `depth > 0`, can precede a prunable exclusion; metadata predicates and arithmetic are conservatively left unoptimized. The directory row itself is still evaluated normally. Other patterns, filename filters, and exclusions inside `OR` do not trigger pruning. This is a conservative SQL optimization; it does not read Git's index or ignore files.
+For a single `files` source, the optimizer can prune traversal for mandatory `NOT (relative_path GLOB ...)` and `NOT (relative_path GLOB ANY (...))` filters. It recognizes provable subtree patterns ending in `{,/**}` or `/**` and leaves ambiguous wildcard or escape cases to ordinary row filtering. Pruning respects left-to-right `AND` evaluation. An exclusion never skips an earlier expression that might fail. Only proven infallible predecessors, such as `depth > 0`, can precede a prunable exclusion. The optimizer leaves metadata predicates and arithmetic unoptimized. fsql still evaluates the row of the excluded directory itself. Other patterns, filename filters, and exclusions inside `OR` do not trigger pruning. Pruning is a conservative optimization of the SQL and does not read Git's index or ignore files.
 
-Columns are read lazily, so a query touching only `path` and `kind` never calls `statx`.
+fsql reads columns lazily. A query that touches only `path` and `kind` never calls `statx`.
 
 `mounts` lists mounted filesystems: `mountpoint`, `fstype`, `source`, `options`, `readonly`, `dev`, `mnt_id`, `topology`, `transport`, `media`, `case_sensitive`, `remote`.
 
 `xattrs` has one row per extended attribute below the root: `path`, `name`, `value`, `size`.
 
-`acls` has one row per POSIX ACL entry below the root: `path`, `kind` (`access` or `default`), `tag`, `qualifier`, `perms`.
+`acls` has one row per POSIX ACL entry below the root: `path`, `kind`, `tag`, `qualifier`, `perms`. `kind` is `access` or `default`.
 
 ## Literals and operators
 
@@ -169,12 +169,12 @@ name like 'a_c%'     name ilike 'A%'
 Functions: `now`, `lower`, `upper`, `length`, `trim`, `substr`, `replace`, `starts_with`, `ends_with`, `contains`, `coalesce`, `ifnull`, `nullif`, `abs`, `basename`, `dirname`, `extension`, `human`, `oct`, `typeof`, `cast`, `extract`.\
 Aggregates: `count`, `sum`, `avg`, `min`, `max`, `group_concat`.
 
-Comparing values of different types is an error rather than a silent mismatch, so `size > 'big'` fails instead of matching nothing.\
-Numeric equality is shared by comparisons, grouping, distinctness and set operations: `1` and `1.0` represent the same key.\
-Integer/float comparisons preserve large integer precision.
+Comparing values of different types is an error, so `size > 'big'` fails.\
+Comparisons, grouping, distinctness and set operations treat `1` and `1.0` as equal.\
+Integer and float comparisons preserve large integer precision.
 
-Names, function arities and grouping are validated before scanning.\
-Unsupported function modifiers, including window functions, are rejected explicitly.
+fsql validates names, function arities and grouping before scanning.\
+fsql rejects unsupported function modifiers, including window functions.
 
 ## Joins, subqueries, CTEs, set operations
 
@@ -189,12 +189,12 @@ select ext from files except select 'rs'
 select * from (values (1, 'a'), (2, 'b')) v
 ```
 
-Inner, left, right, full and cross joins with `ON` or `USING`.\
-Scalar, `IN`, `EXISTS`, `ANY` and `ALL` subqueries, correlated or not.\
-Plain and recursive `WITH`. `UNION`, `INTERSECT`, `EXCEPT`, each with `ALL`.\
-Derived tables and `VALUES`.
+fsql supports inner, left, right, full and cross joins with `ON` or `USING`.\
+Subqueries may be scalar, `IN`, `EXISTS`, `ANY` or `ALL`, correlated or not.\
+fsql supports plain and recursive `WITH`, and `UNION`, `INTERSECT` and `EXCEPT`, each with `ALL`.\
+Derived tables and `VALUES` work.
 
-Column references may be qualified with a table alias.
+A column reference may carry a table alias as its qualifier.
 
 ## Mutations
 
@@ -211,26 +211,26 @@ insert into files (path, source) select path || '.bak', path from files where ex
 
 Assignable columns: `path`, `name`, `parent`, `mode`, `uid`, `gid`, `user`, `group`, `atime`, `mtime`, `target`.
 
-`INSERT` takes `path`, `kind`, `mode`, `target`, `uid`, `gid`, `user`, `group`, `atime`, `mtime`, plus `content` (bytes to write into a new file) and `source` (an existing path to copy: bytes for files, target for symlinks, kind and mode when not given).
+`INSERT` takes `path`, `kind`, `mode`, `target`, `uid`, `gid`, `user`, `group`, `atime`, `mtime`, `content` and `source`. `content` holds the bytes to write into a new file. `source` names an existing path to copy. fsql copies the bytes of a source file and the target of a source symlink, and takes the source's kind and mode when the statement does not give them.
 
-A mutation runs in two phases. Resolve walks the tree, evaluates the predicate, and freezes every matching row with its device, inode and ctime. Apply reopens each parent directory component by component without following symlinks and checks the frozen identity. Preflight detects stale targets before the first change; each target is checked again during apply. Metadata updates use a pinned object descriptor. Mutation paths must be absolute and cannot contain `..`.
+A mutation runs in two phases. Resolve walks the tree, evaluates the predicate, and freezes every matching row with its device, inode and ctime. Apply reopens each parent directory component by component without following symlinks and checks the frozen identity. Preflight detects stale targets before the first change, and apply checks each target again. Metadata updates use a pinned object descriptor. Mutation paths must be absolute and cannot contain `..`.
 
-Statements are not filesystem transactions. A failure during apply can follow successful or partial changes, which are reported separately. Rename and unlink operate on directory entries, so concurrent namespace changes cannot be made atomic with identity checks. Update undo validates the recorded post-change identity and refuses replacement objects. Directory identity checks use device and inode because changing children also changes the directory's ctime.
+Statements are not filesystem transactions. A failure during apply can follow successful or partial changes, and fsql reports each kind separately. Rename and unlink act on directory entries, and identity checks cannot make them atomic against concurrent namespace changes. Update undo validates the recorded post-change identity and refuses replacement objects. Directory identity checks use device and inode because changing children also changes the directory's ctime.
 
-A statement is refused during planning when:
+fsql refuses a statement during planning when:
 
 - `DELETE` or `UPDATE` has no `WHERE` clause
 - the `WHERE` clause is always true, such as `1 = 1`
 
-Apply is refused when more rows match than `--cap` allows (default 10000). Mutation resolution requires a complete scan, including its subqueries.
+fsql refuses to apply a statement when more rows match than `--cap` allows. The default cap is 10000. Mutation resolution requires a complete scan, including its subqueries.
 
-`DELETE` removes exactly the rows that matched. A directory is removed only if it is empty by then, so `where name = 'build'` fails on a populated directory while `where path glob '/x/build*'` removes the tree.
+`DELETE` removes exactly the rows that matched. It removes a directory only if the directory is empty by then. `where name = 'build'` fails on a populated directory, while `where path glob '/x/build*'` removes the tree.
 
 ## Journal and undo
 
-Each applied statement writes a journal under `$XDG_DATA_HOME/fsql/journal` (override with `--journal-dir` or `FSQL_JOURNAL_DIR`). Inserts are prepared privately, including their contents and attributes, before becoming visible. Deletes retain the original file, empty directory or symlink in a private `.fsql-ID-N` staging directory on the affected filesystem. This preserves the original inode and metadata even when the journal is on another filesystem. Staging stays outside directories the statement removes; keep these directories until undo completes. Their `.fsql-<hex>-<hex>-<decimal>` names are reserved and excluded from fsql scans and mutation destinations. Creating them requires write access to a surviving parent. Metadata-only updates keep their staging in the journal directory.
+Each applied statement writes a journal under `$XDG_DATA_HOME/fsql/journal`. `--journal-dir` or `FSQL_JOURNAL_DIR` overrides that location. fsql prepares inserts privately, including contents and attributes, before they become visible. A delete keeps the original file, empty directory or symlink in a private `.fsql-ID-N` staging directory on the affected filesystem. The staged object keeps its original inode and metadata even when the journal is on another filesystem. Staging stays outside directories the statement removes. Keep these directories until undo completes. fsql reserves their `.fsql-<hex>-<hex>-<decimal>` names and excludes them from scans and mutation destinations. Creating them requires write access to a surviving parent. Metadata-only updates keep their staging in the journal directory.
 
-Every visible step has a durable replay record and an inverse. Completion checkpoints are published atomically after synchronizing filesystem changes. Interrupted operations appear as `[RECOVERY REQUIRED]` in the journal list:
+Every visible step has a durable replay record and an inverse. fsql publishes completion checkpoints atomically after synchronizing filesystem changes. Interrupted operations appear as `[RECOVERY REQUIRED]` in the journal list:
 
 ```sh
 fsql journal    # list active journals
@@ -238,27 +238,27 @@ fsql recover ID # finish prepared entries, or resume an interrupted undo
 fsql undo ID    # reverse applied steps, including an interrupted apply
 ```
 
-Recovery discards incomplete private preparations and finishes entries whose preparation was durably recorded. It does not rerun the SQL or apply rows that had not reached preparation. Undo can reverse a partially applied entry even when its remaining forward step cannot succeed. Both commands can be interrupted and retried; completed steps are checkpointed. A finished undo retains completion records, hidden from `fsql journal`, so repeated recovery is harmless. The library exposes the same behavior through `fsql::mutate::{recover, undo}`.
+Recovery discards incomplete private preparations and finishes entries whose preparation was durably recorded. It does not rerun the SQL or apply rows that had not reached preparation. Undo can reverse a partially applied entry even when its remaining forward step cannot succeed. You can interrupt and retry both commands, and each completed step has a checkpoint. A finished undo keeps its completion records, so a repeated recovery is harmless. `fsql journal` does not list these records. The library exposes the same behavior through `fsql::mutate::{recover, undo}`.
 
-Recovery checks object identity and recorded metadata. It preserves conflicting objects and reports their paths instead of overwriting them. Resolve the reported conflict (for example, move an unrelated destination aside), then retry. A journal lock prevents simultaneous apply, recover and undo on that journal. Other processes may still edit the filesystem; these operations do not provide SQL transaction isolation or make an entire statement atomic. Filesystems must support durable synchronization and the required same-filesystem renames.
+Recovery checks object identity and recorded metadata. It preserves conflicting objects and reports their paths. Resolve the reported conflict, for example by moving an unrelated destination aside, then retry. A journal lock prevents simultaneous apply, recover and undo on that journal. Other processes may still edit the filesystem; these operations do not provide SQL transaction isolation or make an entire statement atomic. Filesystems must support durable synchronization and the required same-filesystem renames.
 
-Legacy journals remain readable and completed legacy operations can be undone. Interrupted legacy intents lack the staging evidence needed for safe replay and still require manual reconciliation; update records without object identity remain ineligible for automatic undo. Special-file deletion is refused when journaling is enabled.
+fsql can still read legacy journals and undo completed legacy operations. Interrupted legacy intents lack the staging evidence that safe replay needs and still require manual reconciliation. Update records without object identity are not eligible for automatic undo. fsql refuses to delete special files when journaling is enabled.
 
-`--no-journal` applies without any of this and cannot be undone.
+`--no-journal` applies without a journal, and fsql cannot undo the result.
 
 ## Output
 
-`-f table` (default), `csv`, `tsv`, `json` (one object per line), `lines`.
+`-f` accepts `table`, `csv`, `tsv`, `json` and `lines`. `table` is the default, and `json` writes one object per line.
 
-Simple queries stream with `json` and `lines`. Sorting, grouping, distinctness, CTEs and joins may need intermediate storage. Ordered queries with a limit retain only the best `limit + offset` rows when distinctness is not requested. Joins materialize requested columns; `USING` equijoins index their matching keys.
+Simple queries stream with `json` and `lines`. Sorting, grouping, distinctness, CTEs and joins may need intermediate storage. An ordered query with a limit keeps only the best `limit + offset` rows when it does not ask for distinct rows. Joins materialize requested columns; `USING` equijoins index their matching keys.
 
 Filesystem errors stop queries by default. `--best-effort` permits partial SELECT results, prints diagnostics and exits with status 1 when entries were skipped; it does not relax mutation resolution. A streaming query can emit rows before a later failure, so consumers must check its exit status.
 
-Execution defaults to budgets of 1,000,000 cumulative retained row allocations, 256 MiB of estimated retained value allocations, and 10,000,000 work units. Use `--max-rows`, `--max-bytes`, `--max-work` and `--timeout SECONDS` to configure them. Allocation budgets include intermediate results and are conservative cumulative estimates, not process RSS limits. Cancellation and timeouts are checked between operations; they cannot interrupt a blocked filesystem syscall.
+Execution defaults to budgets of 1,000,000 cumulative retained row allocations, 256 MiB of estimated retained value allocations, and 10,000,000 work units. Use `--max-rows`, `--max-bytes`, `--max-work` and `--timeout SECONDS` to configure them. Allocation budgets include intermediate results. They are conservative estimates of cumulative allocations and do not limit process RSS. fsql checks cancellation and timeouts between operations and cannot interrupt a blocked filesystem syscall.
 
 ## Library
 
-`Engine` provides opaque prepared queries and resolved mutations with execution policy captured at preparation time. The mutation cap also applies to library callers. Low-level modules remain available for callers managing their own plans and policies.
+`Engine` returns opaque prepared queries and resolved mutations. Each one captures the execution policy at preparation time. The mutation cap also applies to library callers. Low-level modules remain available for callers that manage their own plans and policies.
 
 ```rust
 use fsql::walk::WalkOptions;
@@ -282,7 +282,7 @@ fn main() -> fsql::Result<()> {
 
 `Engine::resolve_mutation` produces an inspectable `ResolvedMutation`; its consuming `apply(journal_base)` method creates the journal. Disabling recovery requires the explicit `apply_without_journal` method. Apply outcomes include completed entries, failures, partial changes and recovery-required journals.
 
-See [runnable examples] for query files and complete Rust programs demonstrating collection, streaming, and journaled mutation/undo.
+The [runnable examples] include query files and complete Rust programs that collect results, stream rows, and apply and undo a journaled mutation.
 
 ## Build
 
@@ -291,9 +291,9 @@ cargo build --release
 cargo test --workspace
 ```
 
-For repeatable CLI comparisons against `find`, `fd`, and `ls`, plus Criterion engine benchmarks and version/query comparisons, see the [benchmark guide](benchmarks/README.md). Development commands are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+The [benchmark guide](benchmarks/README.md) covers repeatable CLI comparisons against `find`, `fd`, and `ls`, Criterion engine benchmarks, and comparisons between versions and queries. [CONTRIBUTING.md](CONTRIBUTING.md) lists the development commands.
 
-[`vendor/sqlparser`] is a patched copy of [`sqlparser-rs`]; see `vendor/README.md`. [`tree-fucker`] 0.1.0 from crates.io supplies the one-shot `Scan` that performs the `files` traversal. It lists each directory directly, never follows a symbolic link, and applies the mount-crossing policy at every domain boundary, so `-x` stays on the root's filesystem while a plain walk crosses into mounts beneath the root. Rows stream as each directory's listing completes. Traversal operations run under tree-fucker's process-wide resource governor, which the CLI allows one full worker of foreground time. fsql reads metadata lazily with its own `statx` and `readlinkat` calls. These follow-up reads use the listed directory's descriptor while an anchor is available, and an absolute path after the bounded anchor allowance is exhausted. They are separate from the traversal governor. The same library backs the `mounts` probe. Query cancellation also cancels active scans; resource-limit and quarantine events remain fatal even in best-effort mode.
+[`vendor/sqlparser`] is a patched copy of [`sqlparser-rs`], described in `vendor/README.md`. fsql uses [`tree-fucker`] 0.1.0 from crates.io for the one-shot `Scan` that performs the `files` traversal. The scan lists each directory directly, never follows a symbolic link, and applies the mount-crossing policy at every domain boundary. `-x` therefore stays on the root's filesystem, while a plain walk crosses into mounts beneath the root. Rows stream as each directory's listing completes. tree-fucker's process-wide resource governor limits traversal operations, and the CLI configures that governor with one full worker of foreground time. fsql reads metadata lazily with its own `statx` and `readlinkat` calls. These reads use the listed directory's descriptor while an anchor is available, and an absolute path once the bounded anchor allowance runs out. The traversal governor does not limit them. The same library backs the `mounts` probe. Cancelling a query also cancels active scans. Resource-limit and quarantine events stay fatal in best-effort mode.
 
 [`vendor/sqlparser`]: ./vendor/sqlparser/
 [`sqlparser-rs`]: https://github.com/apache/datafusion-sqlparser-rs

@@ -250,8 +250,8 @@ pub fn run_with_options(
     Ok((set, completion))
 }
 
-/// Emit simple scans without collecting their output. More complex queries use
-/// the same budgeted executor as `run_with_options`.
+/// Callback that `stream` calls with the headers and each row. Returning
+/// `ControlFlow::Break` stops the query.
 pub type RowSink<'a> = dyn FnMut(&[String], &[Value]) -> Result<std::ops::ControlFlow<()>> + 'a;
 
 pub fn stream(

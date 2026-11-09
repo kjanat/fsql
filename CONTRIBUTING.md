@@ -1,6 +1,6 @@
 # Development
 
-The commands below use Cargo and Python directly. Contributors using [Runner] can also invoke the repository's Cargo aliases and package scripts with `run fsql`, `run example:query crates`, `run bench:engine`, or `run sandbox:check`. Runner is optional. Cargo aliases are defined in [`.cargo/config.toml`].
+The commands below call Cargo and Python directly. Contributors who use [Runner] can also invoke the repository's Cargo aliases and package scripts with `run fsql`, `run example:query crates`, `run bench:engine`, or `run sandbox:check`. Runner is optional. [`.cargo/config.toml`] defines the Cargo aliases.
 
 ## Examples and benchmarks
 
@@ -16,9 +16,9 @@ cargo bench:engine --save-baseline before
 cargo bench:engine --baseline before
 ```
 
-Benchmark SQL lives in [`benches/queries`], embedded with `include_str!` so file I/O is excluded from timings.
+Benchmark SQL lives in [`benches/queries`]. The benchmarks embed it with `include_str!`, and the timings exclude file I/O.
 
-The Criterion suite separates:
+The Criterion suite includes these groups:
 
 | Group                            | Work measured                                                       | Fixture size            |
 | -------------------------------- | ------------------------------------------------------------------- | ----------------------- |
@@ -27,9 +27,9 @@ The Criterion suite separates:
 | `mutation/resolve_chmod`         | Planning, scanning, and freezing mutation targets                   | 10 and 100 files        |
 | `mutation/apply_chmod_journaled` | Applying permissions and writing recovery records                   | 10 and 100 files        |
 
-Fixtures use ten subdirectories, alternating `.rs`/`.txt` extensions, and deterministic file sizes. Query preparation and fixture creation are outside query timings. Apply benchmarks use a fresh fixture and resolved mutation per iteration; setup and fixture/journal cleanup are outside the timed section. Success checks are included in apply timings. No benchmark mutates an existing user directory.
+Fixtures use ten subdirectories, alternating `.rs`/`.txt` extensions, and deterministic file sizes. Query timings exclude query preparation and fixture creation. Each apply iteration uses a fresh fixture and resolved mutation. Apply timings exclude setup, fixture cleanup and journal cleanup, and include success checks. No benchmark mutates an existing user directory.
 
-Temporary fixtures live under `TMPDIR` (or the system temporary directory). Set `TMPDIR` to an existing directory on the filesystem you want to measure: journal durability costs on tmpfs are not representative of disk storage. These are warm-cache microbenchmarks; they do not flush the OS cache. Throughput counts fixture files, excluding their directories. Criterion writes reports below the Cargo target directory's `criterion` folder. Compare runs on the same machine, filesystem, and build configuration.
+Temporary fixtures live under `TMPDIR`, or under the system temporary directory when `TMPDIR` is unset. Set `TMPDIR` to an existing directory on the filesystem you want to measure. Journal durability costs on tmpfs do not represent disk storage. The benchmarks run with a warm cache and do not flush the OS cache. Throughput counts fixture files and excludes directories. Criterion writes reports below the Cargo target directory's `criterion` folder. Compare runs on the same machine, filesystem, and build configuration.
 
 ## CLI comparisons and policy workloads
 
@@ -50,16 +50,16 @@ The Rust suite also embeds the original, scan-pruned, and indexed-join versions 
 
 ## Disposable filesystem runs (Linux)
 
-Install Bubblewrap (`bwrap`) and use the opt-in Cargo configuration from the workspace root:
+Install Bubblewrap, which provides `bwrap`, and use the opt-in Cargo configuration from the workspace root:
 
 ```sh
 cargo sandbox:fsql --apply -F "${PWD}/examples/sandbox-mutations.fsql"
 cargo sandbox:test
 ```
 
-Cargo builds normally on the host. Each executable it launches through the runner gets a fresh writable `/tmp/fsql-sandbox` as its working directory. The host root is mounted read-only; `/tmp`, `/run`, `/dev`, and `/proc` are private mounts. Home and XDG paths point into the disposable filesystem, including fsql's default journal location. Network access is isolated. The runner fails if Bubblewrap or the required kernel namespace support is unavailable; it never falls back to running the command directly.
+Cargo builds on the host, outside the sandbox. Each executable it launches through the runner gets a fresh writable `/tmp/fsql-sandbox` as its working directory. The runner mounts the host root read-only and gives the sandbox private `/tmp`, `/run`, `/dev`, and `/proc` mounts. Home and XDG paths point into the disposable filesystem, including fsql's default journal location. The sandbox has no network access. The runner fails if Bubblewrap or the required kernel namespace support is unavailable, and never runs the command directly.
 
-To start with existing files, set `FSQL_SANDBOX_SEED` to a directory. Its contents are copied into the writable tree, preserving symlinks; the source stays read-only. Relative seed paths are resolved against the invocation directory.
+To start with existing files, set `FSQL_SANDBOX_SEED` to a directory. The runner copies its contents into the writable tree and preserves symlinks. The source stays read-only. The runner resolves relative seed paths against the invocation directory.
 
 ```sh
 export FSQL_SANDBOX_SEED="${PWD}/tree-sitter-fsql/examples"
@@ -68,9 +68,9 @@ cargo sandbox:fsql -F "${PWD}/examples/inventory.fsql"
 
 Use paths under `/tmp/fsql-sandbox` for mutations. All sandbox files and journals disappear when that invocation ends; use multiple `-e` arguments or a query file to inspect mutations in the same run. Relative query files must exist in the copied tree; use an absolute host path for a read-only query file outside it.
 
-This is a development guard against accidental host filesystem changes, not an environment for executing untrusted code: host files outside the private mounts remain readable, the process inherits environment variables and standard I/O, and compilation/build scripts run outside the sandbox. Filesystem characteristics are those of tmpfs, not necessarily the filesystem used in production.
+This sandbox guards against accidental host filesystem changes during development. Do not use it to run untrusted code. Host files outside the private mounts remain readable, the process inherits environment variables and standard I/O, and compilation and build scripts run outside the sandbox. Filesystem characteristics are those of tmpfs and may differ from the production filesystem.
 
-Cargo wraps each test executable, not each test case. Subprocesses inherit its namespace. Directly launching a binary bypasses the Cargo configuration, and this configuration only selects Linux targets. Use it for native Linux runs; it does not supply cross-compilation emulators or load Zed's WASM extension.
+Cargo wraps each test executable. Test cases within one executable share the sandbox, and subprocesses inherit its namespace. Launching a binary directly bypasses the Cargo configuration, and the configuration selects only Linux targets. Use it for native Linux runs. It supplies no cross-compilation emulators and does not load Zed's WASM extension.
 
 Validate the wrapper itself with:
 

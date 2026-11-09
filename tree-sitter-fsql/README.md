@@ -1,10 +1,10 @@
 # tree-sitter-fsql
 
-A permissive tree-sitter grammar for `.fsql` query files, adapted from [Derek Stride (@DerekStride)]'s [`tree-sitter-sql`]. See [UPSTREAM.md] for the pinned source and local changes.
+tree-sitter-fsql is a permissive tree-sitter grammar for `.fsql` query files. It adapts [Derek Stride (@DerekStride)]'s [`tree-sitter-sql`]. See [UPSTREAM.md] for the pinned source and local changes.
 
-The grammar includes SELECT, INSERT, UPDATE, DELETE, joins, subqueries, CTEs, VALUES, and set operations, with fsql byte sizes (`1g`, `4GB`, `1.5MiB`, `1_024k`), octal permissions (`0o755`), and pattern operators (`GLOB`, `REGEXP`, `MATCH`, `LIKE`, `ILIKE`). Comments and multiple semicolon-separated statements are supported, with an optional final semicolon.
+The grammar includes SELECT, INSERT, UPDATE, DELETE, joins, subqueries, CTEs, VALUES, and set operations, with fsql byte sizes (`1g`, `4GB`, `1.5MiB`, `1_024k`), octal permissions (`0o755`), and pattern operators (`GLOB`, `REGEXP`, `MATCH`, `LIKE`, `ILIKE`). It also parses comments and multiple statements separated by semicolons, with an optional final semicolon.
 
-This is an editor parser, not an execution validator. It intentionally retains SQL syntax that the fsql engine rejects. Parsing a mutation does not execute it or prove that it is safe.
+Editors use this grammar. It deliberately accepts SQL syntax that the fsql engine rejects, so a successful parse does not mean fsql can run the query. The fsql engine uses its own Rust parser. Parsing a mutation does not execute it or prove that it is safe.
 
 ## Editor integration
 
@@ -16,7 +16,7 @@ This is an editor parser, not an execution validator. It intentionally retains S
 - External scanner: `src/scanner.c`
 - Queries: `queries/highlights.scm` and `queries/indents.scm`
 
-Compile both C sources with `src` on the include path. The generated parser and headers are checked in, so consumers do not need Node.js or tree-sitter CLI. Editor extensions can point at this repository's `tree-sitter-fsql` directory. The Rust execution parser remains unchanged.
+Compile both C sources with `src` on the include path. The repository includes the generated parser and headers, so consumers need neither Node.js nor the tree-sitter CLI. Editor extensions can point at this repository's `tree-sitter-fsql` directory.
 
 ## Development
 
@@ -30,7 +30,7 @@ bun run --cwd tree-sitter-fsql test
 bun run --cwd tree-sitter-fsql check
 ```
 
-`bun run --cwd tree-sitter-fsql typecheck` typechecks the JavaScript grammar, helpers, and check script. `bun run --cwd tree-sitter-fsql test` runs the retained SQL corpus, fsql regression cases, error recovery, and highlighting assertions. `bun run --cwd tree-sitter-fsql check` parses the example files, compiles the highlight and indent queries, and compares incremental edits with fresh parses. The examples are query files only; these checks never execute filesystem mutations. To run a file through fsql separately, use `fsql tree-sitter-fsql/examples/browse.fsql` from the repository root.
+`bun run --cwd tree-sitter-fsql typecheck` typechecks the JavaScript grammar, helpers, and check script. `bun run --cwd tree-sitter-fsql test` runs the retained SQL corpus, fsql regression cases, error recovery, and highlighting assertions. `bun run --cwd tree-sitter-fsql check` parses the example files, compiles the highlight and indent queries, and compares incremental edits with fresh parses. The examples are query files, and the checks execute no filesystem mutations. To run a file through fsql separately, use `fsql tree-sitter-fsql/examples/browse.fsql` from the repository root.
 
 [Derek Stride (@DerekStride)]: https://github.com/DerekStride
 [`tree-sitter-sql`]: https://github.com/DerekStride/tree-sitter-sql/tree/97614d051eebfd3bc5d97c0bdb5a1638719ca811

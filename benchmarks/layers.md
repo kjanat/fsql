@@ -1,6 +1,6 @@
 # Layer benchmarks and profiles
 
-Run from the repository root. These are Cargo `[[bench]]` targets with `harness = false`, using the optimized bench profile and a custom in-process measurement harness. They complement the CLI and Criterion benchmarks. Each repository builds against its own dependency graph: fsql measures crates.io `tree-fucker` 0.1.0; tree-fucker measures its local library. No sibling checkout or temporary source package is required.
+Run from the repository root. These are Cargo `[[bench]]` targets with `harness = false`. They use the optimized bench profile and a custom in-process measurement harness, and they complement the CLI and Criterion benchmarks. fsql measures crates.io `tree-fucker` 0.1.0, and the tree-fucker repository measures its local library. Neither repository needs a sibling checkout or a temporary source package.
 
 ```sh
 cargo bench:layers --test
@@ -10,11 +10,11 @@ cargo bench:alloc --fixture 20000 all 3 1
 cargo bench:layers /absolute/path/to/input scan-count 25 2
 ```
 
-The aliases invoke `cargo bench --package fsql --bench layers --` and `cargo bench --package fsql --bench layers_alloc --`. The entry points and shared harness live under `benches/`. Cargo's injected `--bench` flag is accepted by the custom argument parser.
+The aliases invoke `cargo bench --package fsql --bench layers --` and `cargo bench --package fsql --bench layers_alloc --`. The entry points and shared harness live under `benches/`. The custom argument parser accepts Cargo's injected `--bench` flag.
 
-The arguments are `ROOT MODE [RUNS=15] [WARMUPS=2]`, or `--fixture FILES MODE [RUNS] [WARMUPS]`. `MODE=all` runs the repository's complete layer suite sequentially. `--help` lists modes. Zero warmups are allowed; measured runs and fixture files must be positive. Input trees must remain unchanged throughout measurement.
+The arguments are `ROOT MODE [RUNS=15] [WARMUPS=2]`, or `--fixture FILES MODE [RUNS] [WARMUPS]`. `MODE=all` runs the repository's complete layer suite sequentially. `--help` lists modes. `WARMUPS` may be zero; `RUNS` and `FILES` must be positive. Input trees must remain unchanged throughout measurement.
 
-Generated fixtures live under **target/benchmarks**, and are removed when the probe exits. They contain ten directories of sparse files, a hidden directory, Unicode/quoted names and, on Unix, a directory symlink and dangling symlink. Symlinks are not followed. One in seven regular files exceeds 1,000,000 bytes. For comparisons between repositories, pass the same existing input tree to both probes. Generated fixtures are not the same shape as the Python CLI benchmark fixture.
+The probe generates fixtures under `target/benchmarks` and removes them on exit. They contain ten directories of sparse files, a hidden directory, names with Unicode and quotes, and, on Unix, a directory symlink and a dangling symlink. The probes do not follow symlinks. One in seven regular files exceeds 1,000,000 bytes. For comparisons between repositories, pass the same existing input tree to both probes. The generated fixtures differ in shape from the Python CLI benchmark fixture.
 
 | Mode         | Work measured                                                              |
 | ------------ | -------------------------------------------------------------------------- |
@@ -22,11 +22,11 @@ Generated fixtures live under **target/benchmarks**, and are removed when the pr
 | scan-count   | raw Scan event traversal, no absolute file path materialization            |
 | scan-anchors | same Scan with an anchor budget of 1024 instead of zero                    |
 | scan-paths   | Scan plus absolute path materialization per entry                          |
-| scan-stats   | Scan plus diagnostic ScanStats output; use for diagnostics, not timings    |
+| scan-stats   | Scan plus diagnostic ScanStats output; use for diagnostics only            |
 
-The governor is installed once with foreground duty 1.0. Scan follows filesystem domains, uses an unlimited time ceiling and fails on errors, unlisted directories or unexpected boundaries. Anchors retain their safety semantics; this is a bounded-budget comparison, not a proposal to remove them.
+The probe installs the governor once with foreground duty 1.0. Scan follows filesystem domains and uses an unlimited time ceiling. It fails on errors, unlisted directories, and unexpected boundaries. Anchors keep their safety semantics under the bounded budget.
 
-Before each mode, an independent std::fs walk supplies the expected **complete path multiset**, which is compared with the probe's results. Verification materializes paths outside measured iterations. Each iteration checks its row count; the oracle is repeated afterward to detect changed membership. This does not detect every possible concurrent metadata change. Root entries are excluded. Verification checks query paths, not round-tripping the serialized output. The existing CLI benchmark remains responsible for external tool/output equivalence.
+Before each mode, an independent std::fs walk supplies the expected complete path multiset, and the probe compares it with its results. Verification materializes paths outside measured iterations. Each iteration checks its row count, and the probe repeats the oracle afterward to detect changed membership. This misses some concurrent metadata changes. The expected multiset excludes root entries. Verification checks query paths and skips round-tripping the serialized output. The CLI benchmark checks external tool and output equivalence.
 
 TSV results go to stdout; root, run settings and ScanStats go to stderr. Save reports outside the input tree, for example:
 
@@ -36,13 +36,13 @@ cargo bench:layers /absolute/path/to/input all 25 2 >target/benchmarks/layers.ts
 cargo bench:alloc /absolute/path/to/input all 3 1 >target/benchmarks/allocations.tsv
 ```
 
-Timing uses the normal system allocator. **The allocation executable is separate** and uses stats_alloc only as a development dependency; no unsafe code is added to either library. Its timing columns include instrumentation overhead and must not be compared with the timing executable. Allocation columns are per measured iteration (integer averages), separating allocations and reallocations. `bytes_allocated` follows stats_alloc's definition, including positive reallocation growth; it is not RSS, peak memory, or the sum of full requested realloc sizes. Normal timing runs have zero allocation counters because their allocator is not instrumented. Preparation and teardown inside the measured operation are included; fixture creation, oracle verification and governor installation are excluded.
+Timing uses the normal system allocator. The allocation executable is separate and uses stats_alloc only as a development dependency, so neither library gains unsafe code. Its timing columns include instrumentation overhead, so do not compare them with the timing executable. Allocation columns hold integer averages per measured iteration and count allocations and reallocations separately. `bytes_allocated` follows stats_alloc's definition, including positive reallocation growth. It differs from RSS, peak memory, and the sum of full requested realloc sizes. Normal timing runs use an uninstrumented allocator and report zero allocation counters. The measured operation includes preparation and teardown and excludes fixture creation, oracle verification, and governor installation.
 
-Modes run sequentially with warm caches; there is no randomization, cold-cache guarantee or performance threshold. Do not subtract independently measured medians as an exact attribution of cost. CI runs both executables with `--test` as correctness smoke checks, not performance gates.
+Modes run sequentially with warm caches, without randomization or performance thresholds. Subtracting independently measured medians gives only an approximate cost attribution. CI runs both executables with `--test` as correctness smoke checks.
 
 ## Profiling
 
-Build first, then invoke the executable directly to avoid profiling Cargo. Benchmark executable paths depend on Cargo’s toolchain and build layout; obtain the exact path from its JSON artifact output instead of guessing a filename or globbing stale builds. For symbolized profiles, set `CARGO_PROFILE_BENCH_DEBUG=1` on the build command below. Use `--bench layers_alloc` to build the separate allocation executable.
+Build first, then invoke the executable directly to avoid profiling Cargo. Benchmark executable paths depend on Cargo's toolchain and build layout, so read the exact path from the JSON artifact output. For symbolized profiles, set `CARGO_PROFILE_BENCH_DEBUG=1` on the build command below. Use `--bench layers_alloc` to build the separate allocation executable.
 
 ```sh
 set -o pipefail
@@ -54,21 +54,21 @@ perf report --stdio -i target/benchmarks/layers.perf 2>&1 | envctl redact
 strace -c "$layers_bin" /absolute/path/to/input scan-count 1 0 2>&1 | envctl redact
 ```
 
-Profiles and syscall totals include startup, the pre/post oracle walks, one verification traversal, warmups and measured traversals. Use enough measured iterations for CPU profiles to be dominated by the workload; **do not divide total syscall counts by RUNS and call that a single traversal**. Allocation regions exclude verification and warmups. Keep traced/instrumented results separate from normal timing. `perf`, `strace` and `envctl` are optional profiling tools, not prerequisites for the benchmarks.
+Profiles and syscall totals include startup, the oracle walks before and after measurement, one verification traversal, warmups and measured traversals. Use enough measured iterations for the workload to dominate CPU profiles. Do not divide total syscall counts by `RUNS` and report the result as one traversal. Allocation regions exclude verification and warmups. Keep traced and instrumented results separate from normal timing. `perf`, `strace` and `envctl` are optional.
 
 ## fsql layers
 
-| Mode             | Additional work                                                        |
-| ---------------- | ---------------------------------------------------------------------- |
-| walker-count     | fsql Walker entries, counted without collecting paths                  |
-| query-count      | prepare and stream the path query, no serialization                    |
-| query-lines      | path query with buffered Lines output                                  |
-| query-json       | path query with buffered existing JSON output                          |
-| query-flush      | existing JSON writer flushed per row, matching CLI behavior            |
-| query-direct     | experimental single-text-column JSON writer; not a general replacement |
-| query-size-count | regular-file size predicate, no serialization                          |
-| query-size-json  | regular-file size predicate and buffered JSON output                   |
+| Mode             | Additional work                                             |
+| ---------------- | ----------------------------------------------------------- |
+| walker-count     | fsql Walker entries, counted without collecting paths       |
+| query-count      | prepare and stream the path query, no serialization         |
+| query-lines      | path query with buffered Lines output                       |
+| query-json       | path query with buffered existing JSON output               |
+| query-flush      | existing JSON writer flushed per row, matching CLI behavior |
+| query-direct     | experimental JSON writer for a single text column           |
+| query-size-count | regular-file size predicate, no serialization               |
+| query-size-json  | regular-file size predicate and buffered JSON output        |
 
-Output goes to `/dev/null`. Queries select `path` with `depth > 0`; size queries also require `kind = 'file' AND size > 1000000`. Query preparation is included in each measured operation. These are in-process measurements, so use `run bench` to include CLI startup and compare external tools. Use `cargo bench:traversal` for vector-collecting adapters and the other Rust walker libraries, and `cargo bench:engine` for Criterion engine microbenchmarks.
+Output goes to `/dev/null`. Queries select `path` with `depth > 0`; size queries also require `kind = 'file' AND size > 1000000`. Each measured operation includes query preparation. These are in-process measurements, so use `run bench` to include CLI startup and compare external tools. Use `cargo bench:traversal` for vector-collecting adapters and the other Rust walker libraries, and `cargo bench:engine` for Criterion engine microbenchmarks.
 
-The [original investigation](investigations/2026-10-19-layers.md) records the historical baseline and its different methodology. New measurements should use these checked-in probes.
+The [original investigation](investigations/2026-10-19-layers.md) records a baseline measured with a different methodology. Take new measurements with these probes.
