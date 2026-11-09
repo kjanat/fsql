@@ -20,7 +20,7 @@
 # Extensible SQL Lexer and Parser for Rust
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Version](https://img.shields.io/crates/v/sqlparser.svg)](https://crates.io/crates/sqlparser)
+[![Version](https://img.shields.io/crates/v/fsql-sqlparser.svg)](https://crates.io/crates/fsql-sqlparser)
 [![Build Status](https://github.com/apache/datafusion-sqlparser-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/sqlparser-rs/sqlparser-rs/actions?query=workflow%3ARust+branch%3Amain)
 [![codecov](https://codecov.io/gh/apache/datafusion-sqlparser-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/apache/datafusion-sqlparser-rs)
 [![Gitter Chat](https://badges.gitter.im/sqlparser-rs/community.svg)](https://gitter.im/sqlparser-rs/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)

@@ -3,7 +3,6 @@ name        = "fsql"
 version     = { workspace = true }
 edition     = { workspace = true }
 description = "SQL query and mutation engine over the filesystem"
-readme      = { workspace = true }
 repository  = { workspace = true }
 license     = { workspace = true }
 
