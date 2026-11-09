@@ -599,15 +599,23 @@ pub fn sync_entry(dir: &Dir, _name: &Name) -> io::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn sync_entry(dir: &Dir, name: &Name) -> io::Result<()> {
-    match rustix::fs::openat(
-        &dir.0,
-        &name.0,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => File::from(fd).sync_all()?,
-        Err(rustix::io::Errno::NOENT | rustix::io::Errno::ACCESS | rustix::io::Errno::LOOP) => {}
+    let holds_data = match stat::at(&dir.0, &name.0, false) {
+        Ok(stat) => matches!(stat.kind, Kind::File | Kind::Dir),
+        Err(rustix::io::Errno::NOENT) => false,
         Err(errno) => return Err(errno.into()),
+    };
+    if holds_data {
+        match rustix::fs::openat(
+            &dir.0,
+            &name.0,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => File::from(fd).sync_all()?,
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::ACCESS | rustix::io::Errno::LOOP) => {
+            }
+            Err(errno) => return Err(errno.into()),
+        }
     }
     sync_dir(dir)
 }

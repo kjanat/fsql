@@ -1785,6 +1785,25 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn journaled_fifo_updates_apply_and_undo() {
+        let fx = Fixture::new("fifo");
+        let pipe = fx.at("src/pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        let original = mode(&pipe);
+        let (outcome, id) = fx.run("update files set mode = 0o600 where name = 'pipe'");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert_eq!(mode(&pipe), 0o600);
+        let undone = undo(&fx.base, &id).expect("undo");
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert_eq!(mode(&pipe), original);
+    }
+
     #[test]
     fn copied_tombstones_keep_attributes() {
         let fx = Fixture::new("copy");
