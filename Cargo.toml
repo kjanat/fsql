@@ -29,6 +29,7 @@ tempfile    = "3.27.0"
 uzers       = "0.12.2"
 walkdir     = "2.5.0"
 
+fs_at               = "0.2.1"
 renamore            = "0.3.2"
 winapi-util         = "0.1.11"
 windows-permissions = "0.2.4"

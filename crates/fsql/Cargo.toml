@@ -69,6 +69,7 @@ rustix.workspace = true
 uzers.workspace  = true
 
 [target."cfg(windows)".dependencies]
+fs_at.workspace               = true
 renamore.workspace            = true
 winapi-util.workspace         = true
 windows-permissions.workspace = true

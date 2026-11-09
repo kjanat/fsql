@@ -51,6 +51,22 @@ jobs:
     steps:
       - *checkout
       - *toolchain
+      - name: Mount a FAT32 volume
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:RUNNER_TEMP 'fat32.txt'
+          $disk = Join-Path $env:RUNNER_TEMP 'fat32.vhdx'
+          Set-Content -Path $script -Value @(
+            "create vdisk file=`"$disk`" maximum=64 type=expandable",
+            'attach vdisk',
+            'create partition primary',
+            'format fs=fat32 quick label=FSQLFAT',
+            'assign letter=R'
+          )
+          diskpart /s $script
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value 'FSQL_FAT32_DIR=R:\'
       - name: Test
         run: cargo test --package fsql --all-features --locked
       - name: Clippy

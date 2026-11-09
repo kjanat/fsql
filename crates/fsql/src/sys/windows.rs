@@ -8,12 +8,13 @@ use std::os::windows::fs::{FileTimesExt, FileTypeExt, MetadataExt, OpenOptionsEx
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use fs_at::os::windows::FileExt;
 use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};
 use windows_permissions::wrappers::{GetSecurityInfo, LookupAccountSid};
 use windows_permissions::{LocalBox, SecurityDescriptor, Sid};
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
+    DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FILE_WRITE_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE,
@@ -386,7 +387,20 @@ pub fn unlink(dir: &Dir, name: &Name, kind: Kind) -> io::Result<()> {
     if directory {
         std::fs::remove_dir(&path)
     } else {
-        std::fs::remove_file(&path)
+        remove_file(&path)
+    }
+}
+
+fn remove_file(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => open_handle(
+            path,
+            DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+            false,
+        )?
+        .delete_by_handle()
+        .map_err(|(_, error)| error),
+        result => result,
     }
 }
 
@@ -761,6 +775,30 @@ mod tests {
             assert_eq!(source.to_string(), "refusing to follow a link", "{refused}");
         }
         std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn read_only_files_are_removed() {
+        let base =
+            std::env::var_os("FSQL_FAT32_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let dir = base.join(format!("fsql-read-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("locked.txt");
+        std::fs::write(&file, b"locked").expect("file");
+        let mut permissions = std::fs::metadata(&file).expect("meta").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions).expect("read-only");
+        let chain = open_chain(&dir).expect("chain");
+        unlink(
+            &chain,
+            &Name::new(OsStr::new("locked.txt")).expect("name"),
+            Kind::File,
+        )
+        .expect("unlink");
+        drop(chain);
+        assert!(std::fs::symlink_metadata(&file).is_err());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
