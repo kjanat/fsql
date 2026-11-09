@@ -977,7 +977,7 @@ fn hint(term: &Expr) -> Option<Hint> {
                 Some(text) => {
                     let mut chars = string_literal(text)?.chars();
                     let escape = chars.next()?;
-                    if chars.next().is_some() {
+                    if chars.next().is_some() || !escape.is_ascii() {
                         return None;
                     }
                     Some(escape)
@@ -1366,6 +1366,7 @@ mod tests {
             (format!("path = '{display}/a/b/c/file'"), Some(("a/b/c", 3))),
             (format!("parent = '{display}/a'"), Some(("a", 1))),
             (format!("path like '{literal}/%' escape '!'"), None),
+            (format!("path like '{display}/a/b/%' escape 'é'"), None),
             (
                 format!("path like '{literal}/a/%' escape '!' or ext = 'x'"),
                 None,
