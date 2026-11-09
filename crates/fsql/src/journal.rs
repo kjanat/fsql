@@ -63,6 +63,11 @@ pub fn default_base() -> PathBuf {
     if let Some(dir) = std::env::var_os("FSQL_JOURNAL_DIR") {
         return PathBuf::from(dir);
     }
+    if cfg!(windows)
+        && let Some(data) = std::env::var_os("LOCALAPPDATA")
+    {
+        return PathBuf::from(data).join("fsql").join("journal");
+    }
     if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
         return PathBuf::from(data).join("fsql/journal");
     }
@@ -94,9 +99,7 @@ impl Journal {
         let dir = base.join(&id);
         std::fs::create_dir(&dir).map_err(|e| io(&dir, e))?;
         let dir = std::fs::canonicalize(&dir).map_err(|e| io(&dir, e))?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| io(&dir, e))?;
+        crate::sys::set_private(&dir).map_err(|e| io(&dir, e))?;
         std::fs::create_dir(dir.join("tomb")).map_err(|e| io(&dir, e))?;
         std::fs::write(dir.join("statement.sql"), sql).map_err(|e| io(&dir, e))?;
         let log_path = dir.join("log.jsonl");
@@ -105,7 +108,9 @@ impl Journal {
             .append(true)
             .open(&log_path)
             .map_err(|e| io(&log_path, e))?;
-        File::open(dir.join("statement.sql"))
+        OpenOptions::new()
+            .write(true)
+            .open(dir.join("statement.sql"))
             .and_then(|f| f.sync_all())
             .map_err(|e| io(&dir, e))?;
         log.sync_all().map_err(|e| io(&log_path, e))?;
@@ -323,9 +328,7 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 pub(crate) fn sync_dir(path: &Path) -> Result<()> {
-    File::open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| io(path, e))
+    crate::sys::sync_dir_path(path).map_err(|e| io(path, e))
 }
 
 fn durable_create(path: &Path, data: &[u8]) -> Result<()> {

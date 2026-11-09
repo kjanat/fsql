@@ -1,12 +1,38 @@
 use std::fs;
 use std::ops::ControlFlow;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fsql::journal::{self, Journal, Record};
 use fsql::walk::WalkOptions;
-use fsql::{Engine, Error, ErrorPolicy, Value};
+use fsql::{Engine, Error, Value};
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(windows)]
+fn set_mode(path: &Path, mode: u32) {
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_readonly(mode & 0o222 == 0);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
+fn mode(path: &Path) -> u32 {
+    fsql::sys::stat_path(path, true).unwrap().mode & 0o777
+}
+
+#[cfg(unix)]
+fn file_mode(mode: u32) -> u32 {
+    mode
+}
+
+#[cfg(windows)]
+fn file_mode(mode: u32) -> u32 {
+    if mode & 0o222 == 0 { 0o444 } else { 0o666 }
+}
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -117,8 +143,10 @@ fn mutation_paths_do_not_silently_discard_parent_components() {
     assert!(!fx.path("a/b/wrong").exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn one_filesystem_cannot_be_bypassed_by_an_exact_path_predicate() {
+    use std::os::unix::fs::MetadataExt;
     if fs::metadata("/dev").unwrap().dev() == fs::metadata("/dev/shm").unwrap().dev() {
         return;
     }
@@ -143,16 +171,18 @@ fn one_filesystem_cannot_be_bypassed_by_an_exact_path_predicate() {
     assert!(result.unwrap().0.rows.is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn strict_and_best_effort_scans_have_distinct_contracts() {
-    if rustix::process::geteuid().is_root() {
+    use fsql::ErrorPolicy;
+    if fsql::sys::effective_root() {
         return;
     }
     let fx = Fixture::new();
     let dir = fx.path("blocked");
     fs::create_dir(&dir).unwrap();
     fs::write(dir.join("hidden"), b"x").unwrap();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o0)).unwrap();
+    set_mode(&dir, 0o0);
     let mut engine = fx.engine();
     let strict = engine
         .prepare_query("select count(*) from files")
@@ -164,7 +194,7 @@ fn strict_and_best_effort_scans_have_distinct_contracts() {
         .unwrap()
         .collect();
     let mutation = engine.resolve_mutation("delete from files where name = 'hidden'");
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    set_mode(&dir, 0o700);
     assert!(strict.is_err());
     assert!(mutation.is_err());
     let (set, completion) = partial.unwrap();
@@ -177,7 +207,7 @@ fn update_undo_refuses_a_replacement_object() {
     let fx = Fixture::new();
     let path = fx.path("victim");
     fs::write(&path, b"old").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&path, 0o600);
     let base = fx.path("journal");
     let (outcome, id) = fx
         .engine()
@@ -188,14 +218,11 @@ fn update_undo_refuses_a_replacement_object() {
     assert_eq!(outcome.applied, 1);
     fs::rename(&path, fx.path("original")).unwrap();
     fs::write(&path, b"replacement").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+    set_mode(&path, 0o640);
     let outcome = fsql::mutate::undo(&base, &id).unwrap();
     assert_eq!(outcome.applied, 0);
     assert!(matches!(&outcome.failures[0].1, Error::Stale(_)));
-    assert_eq!(
-        fs::metadata(path).unwrap().permissions().mode() & 0o777,
-        0o640
-    );
+    assert_eq!(mode(&path), file_mode(0o640));
 }
 
 #[test]
@@ -320,9 +347,10 @@ fn library_mutation_cap_is_enforced_before_apply() {
     assert!(fx.path("b").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failed_insert_preparation_never_exposes_partial_content() {
-    if rustix::process::geteuid().is_root() {
+    if fsql::sys::effective_root() {
         return;
     }
     let fx = Fixture::new();
@@ -369,7 +397,7 @@ fn chmod_can_restore_an_unreadable_owned_file_without_following_links() {
     let fx = Fixture::new();
     let path = fx.path("unreadable");
     fs::write(&path, b"x").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).unwrap();
+    set_mode(&path, 0o0);
     let (outcome, _) = fx
         .engine()
         .resolve_mutation("update files set mode = 0o600 where name = 'unreadable'")
@@ -377,10 +405,7 @@ fn chmod_can_restore_an_unreadable_owned_file_without_following_links() {
         .apply(&fx.path("journal"))
         .unwrap();
     assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
-    assert_eq!(
-        fs::metadata(path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert_eq!(mode(&path), file_mode(0o600));
 }
 
 #[test]
@@ -502,7 +527,7 @@ fn relative_paths_and_pruning_agree_in_streaming_and_collected_queries() {
     fs::create_dir_all(fx.path("src")).unwrap();
     fs::write(fx.path("build/deep/discard.rs"), b"x").unwrap();
     fs::write(fx.path("src/keep.rs"), b"x").unwrap();
-    std::os::unix::fs::symlink("src/keep.rs", fx.path("link")).unwrap();
+    fsql::sys::symlink_path(b"src/keep.rs", &fx.path("link")).unwrap();
     // Keep the original public struct-literal API working without optimizer fields.
     let engine = Engine::new(
         &fx.0,

@@ -1,14 +1,8 @@
-use std::ffi::{CStr, CString};
-use std::os::fd::OwnedFd;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustix::fs::{CWD, Mode, OFlags};
-use rustix::io::Errno;
-use rustix::process::{Resource, getrlimit};
 use tree_fucker::domain::DomainCrossing;
 use tree_fucker::entry::EntryKind;
 use tree_fucker::fs::{FsError, ObservedKind};
@@ -21,11 +15,7 @@ use tree_fucker::{HostConfig, HostGovernor, HostGovernorError};
 use crate::error::{Error, Result};
 use crate::prune::Pruning;
 use crate::row::{Entry, Kind, Shared};
-
-const DIR_FLAGS: OFlags = OFlags::RDONLY
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC);
+use crate::sys;
 
 #[derive(Debug, Clone, Default)]
 pub struct WalkOptions {
@@ -62,35 +52,6 @@ pub fn install_governor() -> std::result::Result<HostGovernor, HostGovernorError
     })
 }
 
-pub fn c_name(name: &std::ffi::OsStr, path: &Path) -> Result<CString> {
-    CString::new(name.as_bytes()).map_err(|_| Error::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::other("path contains a NUL byte"),
-    })
-}
-
-fn open_dir(dirfd: impl rustix::fd::AsFd, name: &CStr, path: &Path) -> Result<OwnedFd> {
-    rustix::fs::openat(dirfd, name, DIR_FLAGS, Mode::empty()).map_err(|errno| Error::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::from(errno),
-    })
-}
-
-pub fn open_chain(directory: &Path) -> Result<OwnedFd> {
-    validate_path(directory)?;
-    let mut fd = open_dir(CWD, c"/", Path::new("/"))?;
-    let mut opened = PathBuf::from("/");
-    for component in directory.components() {
-        let Component::Normal(part) = component else {
-            continue;
-        };
-        opened.push(part);
-        let c_part = c_name(part, &opened)?;
-        fd = open_dir(&fd, &c_part, &opened)?;
-    }
-    Ok(fd)
-}
-
 /// Return an error unless the path is absolute and has no `..` component and
 /// no NUL byte.
 pub fn validate_path(path: &Path) -> Result<()> {
@@ -104,8 +65,7 @@ pub fn validate_path(path: &Path) -> Result<()> {
             path.display()
         )));
     }
-    c_name(path.as_os_str(), path)?;
-    Ok(())
+    sys::validate_name(path)
 }
 
 fn kind_of(kind: ObservedKind) -> Kind {
@@ -119,17 +79,17 @@ fn kind_of(kind: ObservedKind) -> Kind {
 
 fn io_error(error: &FsError) -> std::io::Error {
     match error {
-        FsError::NotFound => Errno::NOENT.into(),
-        FsError::NotDirectory => Errno::NOTDIR.into(),
-        FsError::PermissionDenied => Errno::ACCESS.into(),
+        FsError::NotFound => std::io::ErrorKind::NotFound.into(),
+        FsError::NotDirectory => std::io::ErrorKind::NotADirectory.into(),
+        FsError::PermissionDenied => std::io::ErrorKind::PermissionDenied.into(),
         other => std::io::Error::other(other.to_string()),
     }
 }
 
 fn scan_error(path: &Path, error: &tree_fucker::Error) -> Error {
     let source = match error {
-        tree_fucker::Error::NotFound => Errno::NOENT.into(),
-        tree_fucker::Error::NotDirectory => Errno::NOTDIR.into(),
+        tree_fucker::Error::NotFound => std::io::ErrorKind::NotFound.into(),
+        tree_fucker::Error::NotDirectory => std::io::ErrorKind::NotADirectory.into(),
         tree_fucker::Error::Io(error) => io_error(error),
         other => std::io::Error::other(other.to_string()),
     };
@@ -139,17 +99,12 @@ fn scan_error(path: &Path, error: &tree_fucker::Error) -> Error {
     }
 }
 
-fn anchor_limit() -> usize {
-    let open_files = getrlimit(Resource::Nofile).current.unwrap_or(u64::MAX);
-    usize::try_from(open_files / 4).unwrap_or(usize::MAX)
-}
-
 pub struct Walker {
     shared: Rc<Shared>,
     scan: Scan,
     root: PathBuf,
     initial_depth: u32,
-    source_root: PathBuf,
+    source_root: std::rc::Rc<Path>,
     directory: Option<(RelativePath, PathBuf)>,
     cancellation: Option<crate::execution::ScanCancellation>,
 }
@@ -209,7 +164,7 @@ impl Walker {
                 true => DomainCrossing::Exclude,
                 false => DomainCrossing::Follow,
             },
-            anchors: anchor_limit(),
+            anchors: sys::anchor_limit(),
             ceiling: Duration::MAX,
             ..ScanOptions::default()
         };
@@ -226,11 +181,11 @@ impl Walker {
                 "private recovery directories cannot be queried".into(),
             ));
         }
-        let source_root = root
-            .ancestors()
-            .nth(narrowed_depth)
-            .unwrap_or(Path::new("/"))
-            .to_path_buf();
+        let source_root = std::rc::Rc::from(
+            root.ancestors()
+                .nth(narrowed_depth)
+                .unwrap_or_else(|| sys::root(&root)),
+        );
         Ok(Self {
             shared: Shared::new(),
             scan,
@@ -328,8 +283,6 @@ fn unlisted_error(path: &Path, failure: ScanFailure) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
     use super::*;
     use crate::eval::Row;
     use crate::value::Value;
@@ -341,8 +294,8 @@ mod tests {
         std::fs::write(dir.join("a.txt"), b"hello").expect("file");
         std::fs::write(dir.join("sub/b.TMP"), b"x".repeat(2048)).expect("file");
         std::fs::write(dir.join("sub/deeper/.hidden"), b"").expect("file");
-        symlink("a.txt", dir.join("link")).expect("symlink");
-        symlink("nowhere", dir.join("dangling")).expect("symlink");
+        sys::symlink_path(b"a.txt", &dir.join("link")).expect("symlink");
+        sys::symlink_path(b"nowhere", &dir.join("dangling")).expect("symlink");
         dir
     }
 
@@ -361,19 +314,29 @@ mod tests {
         let walker = Walker::new(&dir, WalkOptions::default()).expect("walker");
         let found = names(walker);
         let canonical = std::fs::canonicalize(&dir).expect("canonical");
-        let expected: Vec<String> = [
+        let mut expected: Vec<String> = [
             "",
-            "/a.txt",
-            "/dangling",
-            "/link",
-            "/sub",
-            "/sub/b.TMP",
-            "/sub/deeper",
-            "/sub/deeper/.hidden",
+            "a.txt",
+            "dangling",
+            "link",
+            "sub",
+            "sub/b.TMP",
+            "sub/deeper",
+            "sub/deeper/.hidden",
         ]
         .iter()
-        .map(|suffix| format!("{}{suffix}", canonical.display()))
+        .map(|suffix| {
+            let path = suffix.split('/').fold(canonical.clone(), |path, part| {
+                if part.is_empty() {
+                    path
+                } else {
+                    path.join(part)
+                }
+            });
+            path.to_string_lossy().into_owned()
+        })
         .collect();
+        expected.sort();
         assert_eq!(found, expected);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -390,8 +353,8 @@ mod tests {
         )
         .expect("walker");
         let found = names(walker);
-        assert!(found.iter().any(|p| p.ends_with("/sub")));
-        assert!(!found.iter().any(|p| p.ends_with("/sub/b.TMP")));
+        assert!(found.iter().any(|p| Path::new(p).ends_with("sub")));
+        assert!(!found.iter().any(|p| Path::new(p).ends_with("sub/b.TMP")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -488,6 +451,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn rows_read_their_columns_through_the_directory_they_were_listed_from() {
         let dir = fixture("anchored");
@@ -516,7 +480,7 @@ mod tests {
 
     #[test]
     fn a_depth_limit_counts_from_the_initial_depth() {
-        let dir = fixture("offset");
+        let dir = std::fs::canonicalize(fixture("offset")).expect("canonical");
         let walker = Walker::new(
             &dir,
             WalkOptions {
@@ -548,8 +512,10 @@ mod tests {
         assert!(matches!(result, Err(Error::Io { .. })));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_subdirectory_is_reported_and_skipped() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = fixture("unreadable");
         let locked = dir.join("locked");
         std::fs::create_dir(&locked).expect("dir");

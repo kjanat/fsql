@@ -152,6 +152,23 @@ fsql reads columns lazily. A query that touches only `path` and `kind` never cal
 
 `acls` has one row per POSIX ACL entry below the root: `path`, `kind`, `tag`, `qualifier`, `perms`. `kind` is `access` or `default`.
 
+### Platforms
+
+fsql runs on Linux, macOS and Windows. Linux reads `/proc/self/mountinfo` and the POSIX ACL extended attributes.
+
+On macOS, `mounts` lists the volumes that the system reports, and `mnt_id` is NULL. `acls` lists the NFSv4 ACL entries, with `perms` such as `allow:read,write`.
+
+On Windows:
+
+- `mode` and `perms` come from the read-only attribute. Files show `0o666`, or `0o444` when read-only. Directories, and files ending in `.exe`, `.bat`, `.cmd` or `.com`, add `0o111`. Setting `mode` sets or clears the read-only attribute.
+- `uid`, `gid`, `blocks` and `ctime` are NULL. `btime` is the creation time. `inode` is the NTFS file index and `dev` the volume serial number.
+- `user` and `group` name the owner and primary group of the security descriptor as `DOMAIN\name`. Assigning `user`, `group`, `uid` or `gid` fails.
+- `hidden` is also true for entries with the hidden attribute.
+- `mounts` lists fixed and removable volumes, and `mnt_id` is NULL.
+- `acls` lists the DACL entries. `tag` is `allow` or `deny`, `qualifier` names the account, and `perms` shows read, write and execute rights as `rwx`.
+- `xattrs` fails, because Windows offers no safe way to list alternate data streams.
+- Creating a symlink needs Developer Mode or administrator rights.
+
 ## Literals and operators
 
 ```sql
@@ -227,7 +244,7 @@ fsql refuses to apply a statement when more rows match than `--cap` allows. The 
 
 ## Journal and undo
 
-Each applied statement writes a journal under `$XDG_DATA_HOME/fsql/journal`. `--journal-dir` or `FSQL_JOURNAL_DIR` overrides that location. fsql prepares inserts privately, including contents and attributes, before they become visible. A delete keeps the original file, empty directory or symlink in a private `.fsql-ID-N` staging directory on the affected filesystem. The staged object keeps its original inode and metadata even when the journal is on another filesystem. Staging stays outside directories the statement removes. Keep these directories until undo completes. fsql reserves their `.fsql-<hex>-<hex>-<decimal>` names and excludes them from scans and mutation destinations. Creating them requires write access to a surviving parent. Metadata-only updates keep their staging in the journal directory.
+Each applied statement writes a journal under `$XDG_DATA_HOME/fsql/journal`, or `%LOCALAPPDATA%\fsql\journal` on Windows. `--journal-dir` or `FSQL_JOURNAL_DIR` overrides that location. fsql prepares inserts privately, including contents and attributes, before they become visible. A delete keeps the original file, empty directory or symlink in a private `.fsql-ID-N` staging directory on the affected filesystem. The staged object keeps its original inode and metadata even when the journal is on another filesystem. Staging stays outside directories the statement removes. Keep these directories until undo completes. fsql reserves their `.fsql-<hex>-<hex>-<decimal>` names and excludes them from scans and mutation destinations. Creating them requires write access to a surviving parent. Metadata-only updates keep their staging in the journal directory.
 
 Every visible step has a durable replay record and an inverse. fsql publishes completion checkpoints atomically after synchronizing filesystem changes. Interrupted operations appear as `[RECOVERY REQUIRED]` in the journal list:
 

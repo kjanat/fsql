@@ -270,14 +270,15 @@ fn fixture(shape: &str) -> tempfile::TempDir {
         )
         .unwrap();
     }
+    #[cfg(unix)]
     std::fs::write(temp.path().join(".hidden\nfile"), "hidden").unwrap();
     std::fs::create_dir_all(temp.path().join("src/node_modules/nested")).unwrap();
     std::fs::create_dir_all(temp.path().join(".git/objects")).unwrap();
     if shape != "excluded" {
         std::fs::write(temp.path().join("target"), "excluded file").unwrap();
     }
-    std::os::unix::fs::symlink("missing", temp.path().join("broken-link")).unwrap();
-    std::os::unix::fs::symlink("src", temp.path().join("directory-link")).unwrap();
+    fsql::sys::symlink_path(b"missing", &temp.path().join("broken-link")).unwrap();
+    fsql::sys::symlink_path(b"src", &temp.path().join("directory-link")).unwrap();
     temp
 }
 

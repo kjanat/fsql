@@ -21,6 +21,7 @@ mod pattern;
 pub mod plan;
 mod prune;
 pub mod row;
+pub mod sys;
 pub mod time;
 pub mod value;
 pub mod walk;

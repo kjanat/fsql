@@ -1,7 +1,5 @@
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
-use std::time::UNIX_EPOCH;
 
 use fsql::output::ResultSet;
 use fsql::walk::WalkOptions;
@@ -10,9 +8,11 @@ use fsql::{Engine, Value};
 const LARGEST: &str = include_str!("../examples/queries/largest-files.fsql");
 const DIRECTORIES: &str = include_str!("../../../examples/directory-usage.fsql");
 const DUPLICATES: &str = include_str!("../../../examples/duplicate-sizes.fsql");
-const EXECUTABLES: &str = include_str!("../../../examples/largest-executables.fsql");
-const WRITABLE: &str = include_str!("../../../examples/world-writable-recent.fsql");
 const EXTENSIONS: &str = include_str!("../../../examples/by-extension.fsql");
+
+fn symlink(target: &str, link: &Path) {
+    fsql::sys::symlink_path(target.as_bytes(), link).unwrap();
+}
 
 fn query(root: &Path, sql: &str) -> ResultSet {
     let (set, completion) = Engine::new(root, WalkOptions::default())
@@ -36,8 +36,8 @@ fn largest_files_reports_whole_tree_totals_before_limit() {
         )
         .unwrap();
     }
-    symlink("nested/file-1.txt", root.join("file-link")).unwrap();
-    symlink("nested", root.join("dir-link")).unwrap();
+    symlink("nested/file-1.txt", &root.join("file-link"));
+    symlink("nested", &root.join("dir-link"));
     let set = query(root, LARGEST);
     assert_eq!(
         set.headers,
@@ -79,19 +79,19 @@ fn empty_tree_still_reports_directory_totals() {
 #[test]
 fn recursive_directory_totals_stay_within_the_root() {
     let fixture = tempfile::tempdir().unwrap();
-    let root = fixture.path();
+    let root = &fs::canonicalize(fixture.path()).unwrap();
     fs::create_dir_all(root.join("nested/deep")).unwrap();
     fs::create_dir(root.join("empty")).unwrap();
     fs::write(root.join("a"), b"a").unwrap();
     fs::write(root.join("nested/b"), b"bb").unwrap();
     fs::write(root.join("nested/deep/c"), b"ccc").unwrap();
-    symlink("nested", root.join("link")).unwrap();
+    symlink("nested", &root.join("link"));
     let set = query(root, DIRECTORIES);
     assert_eq!(set.rows.len(), 3);
     for (row, (path, count, bytes)) in set.rows.iter().zip([
         (root.to_path_buf(), 3, 6),
         (root.join("nested"), 2, 5),
-        (root.join("nested/deep"), 1, 3),
+        (root.join("nested").join("deep"), 1, 3),
     ]) {
         assert_eq!(row[0], Value::Text(path.to_str().unwrap().into()));
         assert_eq!(row[1], Value::Int(count));
@@ -120,8 +120,13 @@ fn duplicate_sizes_report_candidates_and_skip_empty_files() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn permission_reports_filter_execute_write_and_modification_time() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::UNIX_EPOCH;
+    const EXECUTABLES: &str = include_str!("../../../examples/largest-executables.fsql");
+    const WRITABLE: &str = include_str!("../../../examples/world-writable-recent.fsql");
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     for (name, mode) in [

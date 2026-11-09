@@ -979,9 +979,16 @@ fn hint(term: &Expr) -> Option<Hint> {
         Expr::BinaryOp { left, op, right } => match op {
             BinaryOperator::Glob if is_column(left, Column::Path) => {
                 let pattern = string_literal(right)?;
-                let end = pattern
-                    .find(['*', '?', '[', '{', '\\'])
-                    .unwrap_or(pattern.len());
+                let start = crate::sys::VERBATIM_PREFIXES
+                    .iter()
+                    .find_map(|prefix| pattern.strip_prefix(prefix).map(|_| prefix.len()))
+                    .unwrap_or(0);
+                let end = pattern[start..]
+                    .find(|c| {
+                        matches!(c, '*' | '?' | '[' | '{')
+                            || (c == '\\' && !std::path::is_separator(c))
+                    })
+                    .map_or(pattern.len(), |end| start + end);
                 Some(Hint::Prefix(pattern[..end].to_owned()))
             }
             BinaryOperator::Eq if is_column(left, Column::Path) => {
@@ -1027,29 +1034,15 @@ fn hint(term: &Expr) -> Option<Hint> {
 }
 
 fn hint_directory(hint: &Hint) -> Option<PathBuf> {
+    let (Hint::Prefix(text) | Hint::Exact(text) | Hint::Parent(text)) = hint;
+    let path = crate::sys::native_path(text);
+    if !path.is_absolute() {
+        return None;
+    }
     match hint {
-        Hint::Prefix(prefix) => {
-            if !prefix.starts_with('/') {
-                return None;
-            }
-            if let Some(dir) = prefix.strip_suffix('/') {
-                Some(PathBuf::from(if dir.is_empty() { "/" } else { dir }))
-            } else {
-                Path::new(prefix).parent().map(Path::to_path_buf)
-            }
-        }
-        Hint::Exact(path) => {
-            if !path.starts_with('/') {
-                return None;
-            }
-            Path::new(path).parent().map(Path::to_path_buf)
-        }
-        Hint::Parent(dir) => {
-            if !dir.starts_with('/') {
-                return None;
-            }
-            Some(PathBuf::from(dir))
-        }
+        Hint::Prefix(prefix) if prefix.ends_with(std::path::is_separator) => Some(path),
+        Hint::Parent(_) => Some(path),
+        Hint::Prefix(_) | Hint::Exact(_) => path.parent().map(Path::to_path_buf),
     }
 }
 
@@ -1339,7 +1332,14 @@ mod tests {
         ];
         for (sql, expected) in cases {
             let result = narrow(&dir, &parse_filter(&sql));
-            let expected = expected.map(|(suffix, depth)| (dir.join(suffix), depth));
+            let expected = expected.map(|(suffix, depth): (&str, u32)| {
+                (
+                    suffix
+                        .split('/')
+                        .fold(dir.clone(), |path, part| path.join(part)),
+                    depth,
+                )
+            });
             assert_eq!(result, expected, "{sql}");
         }
         let _ = std::fs::remove_dir_all(&dir);

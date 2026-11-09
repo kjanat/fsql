@@ -1,24 +1,16 @@
 use std::cell::OnceCell;
-use std::ffi::{CStr, CString, OsStr, OsString};
-use std::os::fd::{AsFd, BorrowedFd};
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use rustix::fs::{AtFlags, CWD, FileType, Statx, StatxFlags};
 use tree_fucker::fs::Anchor;
 use tree_fucker::std_fs::DirectoryAnchor;
-use uzers::{Groups, Users, UsersCache};
 
 use crate::column::Column;
 use crate::error::{Error, Result};
 use crate::eval::{Row, from_bytes};
-use crate::time;
-use crate::value::Value;
-
-pub const STATX_MASK: StatxFlags = StatxFlags::BASIC_STATS
-    .union(StatxFlags::BTIME)
-    .union(StatxFlags::MNT_ID);
+use crate::sys::{self, Accounts, Name, Stat};
+use crate::value::{Nanos, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -33,21 +25,17 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub fn from_file_type(file_type: FileType) -> Self {
-        match file_type {
-            FileType::RegularFile => Self::File,
-            FileType::Directory => Self::Dir,
-            FileType::Symlink => Self::Symlink,
-            FileType::Fifo => Self::Fifo,
-            FileType::Socket => Self::Socket,
-            FileType::BlockDevice => Self::Block,
-            FileType::CharacterDevice => Self::Char,
-            FileType::Unknown => Self::Unknown,
-        }
-    }
-
     pub fn from_mode(mode: u32) -> Self {
-        Self::from_file_type(FileType::from_raw_mode(mode))
+        match mode & 0o170000 {
+            0o100000 => Self::File,
+            0o040000 => Self::Dir,
+            0o120000 => Self::Symlink,
+            0o010000 => Self::Fifo,
+            0o140000 => Self::Socket,
+            0o060000 => Self::Block,
+            0o020000 => Self::Char,
+            _ => Self::Unknown,
+        }
     }
 
     pub fn as_str(self) -> &'static str {
@@ -80,39 +68,28 @@ impl Identity {
         }
     }
 
-    pub fn of(stat: &Statx) -> Self {
+    pub fn of(stat: &Stat) -> Self {
         Self {
-            dev: makedev(stat.stx_dev_major, stat.stx_dev_minor),
-            ino: stat.stx_ino,
-            ctime: time::from_parts(stat.stx_ctime.tv_sec, stat.stx_ctime.tv_nsec).0,
+            dev: stat.dev,
+            ino: stat.ino,
+            ctime: stat.ctime.unwrap_or(stat.mtime),
         }
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn makedev(major: u32, minor: u32) -> u64 {
     rustix::fs::makedev(major, minor)
 }
 
 #[derive(Default)]
 pub struct Shared {
-    users: UsersCache,
+    accounts: Accounts,
 }
 
 impl Shared {
     pub fn new() -> Rc<Self> {
         Rc::new(Self::default())
-    }
-
-    fn user_name(&self, uid: u32) -> Option<OsString> {
-        self.users
-            .get_user_by_uid(uid)
-            .map(|user| user.name().to_os_string())
-    }
-
-    fn group_name(&self, gid: u32) -> Option<OsString> {
-        self.users
-            .get_group_by_gid(gid)
-            .map(|group| group.name().to_os_string())
     }
 }
 
@@ -128,14 +105,12 @@ pub struct Frozen {
 pub struct Entry {
     shared: Rc<Shared>,
     anchor: Option<Anchor>,
-    full: OnceCell<CString>,
-    name: CString,
+    name: Name,
     path: PathBuf,
-    // Byte boundary of the original source root in the absolute path.
-    relative_start: usize,
+    source_root: Rc<Path>,
     depth: u32,
     kind_hint: Kind,
-    stat: OnceCell<std::result::Result<Statx, rustix::io::Errno>>,
+    stat: OnceCell<std::result::Result<Stat, std::io::ErrorKind>>,
     target: OnceCell<Option<Vec<u8>>>,
 }
 
@@ -150,39 +125,29 @@ impl Entry {
         let root = path
             .ancestors()
             .nth(depth as usize)
-            .unwrap_or(Path::new("/"))
+            .unwrap_or_else(|| sys::root(&path))
             .to_path_buf();
-        Self::rooted(shared, anchor, path, &root, depth, kind_hint)
+        Self::rooted(shared, anchor, path, &Rc::from(root), depth, kind_hint)
     }
 
     pub(crate) fn rooted(
         shared: Rc<Shared>,
         anchor: Option<Anchor>,
         path: PathBuf,
-        source_root: &Path,
+        source_root: &Rc<Path>,
         depth: u32,
         kind_hint: Kind,
     ) -> Result<Self> {
-        let relative = path
-            .strip_prefix(source_root)
-            .map_err(|_| Error::Plan("entry is outside its source root".into()))?;
-        let relative_start = path.as_os_str().len() - relative.as_os_str().len();
-        let nul = |path: &Path| Error::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::other("path contains a NUL byte"),
-        };
-        let name = match path.file_name() {
-            Some(name) => CString::new(name.as_bytes()),
-            None => CString::new(&b"."[..]),
+        if !path.starts_with(source_root) {
+            return Err(Error::Plan("entry is outside its source root".into()));
         }
-        .map_err(|_| nul(&path))?;
+        let name = sys::name_of(path.file_name().unwrap_or(OsStr::new(".")), &path)?;
         Ok(Self {
             shared,
             anchor,
-            full: OnceCell::new(),
             name,
             path,
-            relative_start,
+            source_root: source_root.clone(),
             depth,
             kind_hint,
             stat: OnceCell::new(),
@@ -191,7 +156,7 @@ impl Entry {
     }
 
     pub fn name(&self) -> &OsStr {
-        OsStr::from_bytes(self.name.as_bytes())
+        self.name.as_os_str()
     }
 
     pub fn path(&self) -> &Path {
@@ -200,9 +165,9 @@ impl Entry {
 
     /// Path relative to the original source root, empty for the root row.
     pub fn relative_path(&self) -> &Path {
-        Path::new(OsStr::from_bytes(
-            &self.path.as_os_str().as_bytes()[self.relative_start..],
-        ))
+        self.path
+            .strip_prefix(&self.source_root)
+            .unwrap_or(Path::new(""))
     }
 
     pub fn anchored(&self) -> bool {
@@ -213,32 +178,20 @@ impl Entry {
         self.anchor.as_ref()?.get::<DirectoryAnchor>()
     }
 
-    fn at(&self) -> (BorrowedFd<'_>, &CStr) {
-        match self.directory() {
-            Some(directory) => (directory.as_fd(), &self.name),
-            None => (CWD, self.full()),
-        }
-    }
-
-    fn full(&self) -> &CStr {
-        self.full
-            .get_or_init(|| CString::new(self.path.as_os_str().as_bytes()).unwrap_or_default())
-    }
-
     pub fn depth(&self) -> u32 {
         self.depth
     }
 
-    pub fn stat(&self) -> Result<&Statx> {
+    pub fn stat(&self) -> Result<&Stat> {
         self.stat
             .get_or_init(|| {
-                let (directory, name) = self.at();
-                rustix::fs::statx(directory, name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
+                sys::stat_entry(self.directory(), &self.name, &self.path, false)
+                    .map_err(|error| error.kind())
             })
             .as_ref()
-            .map_err(|errno| Error::Io {
+            .map_err(|kind| Error::Io {
                 path: self.path.clone(),
-                source: std::io::Error::from(*errno),
+                source: std::io::Error::from(*kind),
             })
     }
 
@@ -246,7 +199,7 @@ impl Entry {
         if self.kind_hint != Kind::Unknown {
             return Ok(self.kind_hint);
         }
-        Ok(Kind::from_mode(u32::from(self.stat()?.stx_mode)))
+        Ok(self.stat()?.kind)
     }
 
     pub fn is_dir(&self) -> Result<bool> {
@@ -254,8 +207,7 @@ impl Entry {
     }
 
     pub fn mount_id(&self) -> Result<Option<u64>> {
-        let stat = self.stat()?;
-        Ok((stat.stx_mask & StatxFlags::MNT_ID.bits() != 0).then_some(stat.stx_mnt_id))
+        Ok(self.stat()?.mount_id)
     }
 
     pub fn identity(&self) -> Result<Identity> {
@@ -280,12 +232,9 @@ impl Entry {
         if self.kind()? != Kind::Symlink {
             return Ok(None);
         }
-        let target = self.target.get_or_init(|| {
-            let (directory, name) = self.at();
-            rustix::fs::readlinkat(directory, name, Vec::new())
-                .ok()
-                .map(CString::into_bytes)
-        });
+        let target = self
+            .target
+            .get_or_init(|| sys::readlink_entry(self.directory(), &self.name, &self.path).ok());
         Ok(target.as_deref())
     }
 
@@ -293,10 +242,13 @@ impl Entry {
         if self.kind()? != Kind::Symlink {
             return Ok(None);
         }
-        let (directory, name) = self.at();
-        let followed = rustix::fs::statx(directory, name, AtFlags::empty(), StatxFlags::TYPE);
+        let followed = sys::stat_entry(self.directory(), &self.name, &self.path, true);
         Ok(Some(followed.is_err()))
     }
+}
+
+fn os(text: &OsStr) -> Value {
+    from_bytes(&sys::os_bytes(text))
 }
 
 fn perms(mode: u32) -> String {
@@ -332,85 +284,74 @@ fn perms(mode: u32) -> String {
     out
 }
 
-fn timestamp(seconds: i64, nanos: u32) -> Value {
-    Value::Timestamp(time::from_parts(seconds, nanos))
+fn timestamp(nanos: i64) -> Value {
+    Value::Timestamp(Nanos(nanos))
+}
+
+fn int(value: u64) -> Value {
+    Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn optional(value: Option<u64>) -> Value {
+    value.map(int).unwrap_or(Value::Null)
 }
 
 impl Row for Entry {
     fn column(&self, name: &str) -> Result<Value> {
         let column = Column::parse(name).ok_or_else(|| Error::UnknownColumn(name.to_owned()))?;
         Ok(match column {
-            Column::RelativePath => from_bytes(self.relative_path().as_os_str().as_bytes()),
-            Column::Path => from_bytes(self.path.as_os_str().as_bytes()),
-            Column::Name => from_bytes(self.name.as_bytes()),
+            Column::RelativePath => from_bytes(&sys::slash_bytes(self.relative_path())),
+            Column::Path => os(self.path.as_os_str()),
+            Column::Name => os(self.name()),
             Column::Parent => self
                 .path
                 .parent()
-                .map(|p| from_bytes(p.as_os_str().as_bytes()))
+                .map(|p| os(p.as_os_str()))
                 .unwrap_or(Value::Null),
             Column::Ext => Path::new(self.name())
                 .extension()
                 .map(|ext| {
-                    let bytes = ext.as_bytes();
-                    match std::str::from_utf8(bytes) {
+                    let bytes = sys::os_bytes(ext);
+                    match std::str::from_utf8(&bytes) {
                         Ok(s) => Value::Text(s.to_lowercase()),
                         Err(_) => Value::Blob(bytes.to_ascii_lowercase()),
                     }
                 })
                 .unwrap_or(Value::Null),
             Column::Depth => Value::Int(i64::from(self.depth)),
-            Column::Hidden => Value::Bool(self.name.as_bytes().first() == Some(&b'.')),
+            Column::Hidden => Value::Bool(
+                sys::os_bytes(self.name()).first() == Some(&b'.')
+                    || (sys::HIDDEN_ATTRIBUTE && self.stat()?.hidden),
+            ),
             Column::Kind => Value::Text(self.kind()?.as_str().to_owned()),
-            Column::Size => Value::Int(i64::try_from(self.stat()?.stx_size).unwrap_or(i64::MAX)),
-            Column::Blocks => {
-                Value::Int(i64::try_from(self.stat()?.stx_blocks).unwrap_or(i64::MAX))
-            }
-            Column::Mode => Value::Int(i64::from(self.stat()?.stx_mode)),
-            Column::Perms => Value::Text(perms(u32::from(self.stat()?.stx_mode))),
-            Column::Setuid => Value::Bool(self.stat()?.stx_mode & 0o4000 != 0),
-            Column::Setgid => Value::Bool(self.stat()?.stx_mode & 0o2000 != 0),
-            Column::Sticky => Value::Bool(self.stat()?.stx_mode & 0o1000 != 0),
-            Column::Uid => Value::Int(i64::from(self.stat()?.stx_uid)),
-            Column::Gid => Value::Int(i64::from(self.stat()?.stx_gid)),
+            Column::Size => int(self.stat()?.size),
+            Column::Blocks => optional(self.stat()?.blocks),
+            Column::Mode => Value::Int(i64::from(self.stat()?.mode)),
+            Column::Perms => Value::Text(perms(self.stat()?.mode)),
+            Column::Setuid => Value::Bool(self.stat()?.mode & 0o4000 != 0),
+            Column::Setgid => Value::Bool(self.stat()?.mode & 0o2000 != 0),
+            Column::Sticky => Value::Bool(self.stat()?.mode & 0o1000 != 0),
+            Column::Uid => optional(self.stat()?.uid.map(u64::from)),
+            Column::Gid => optional(self.stat()?.gid.map(u64::from)),
             Column::User => self
                 .shared
-                .user_name(self.stat()?.stx_uid)
-                .map(|name| from_bytes(name.as_bytes()))
+                .accounts
+                .user(&self.path, self.stat()?)
+                .map(|name| from_bytes(&name))
                 .unwrap_or(Value::Null),
             Column::Group => self
                 .shared
-                .group_name(self.stat()?.stx_gid)
-                .map(|name| from_bytes(name.as_bytes()))
+                .accounts
+                .group(&self.path, self.stat()?)
+                .map(|name| from_bytes(&name))
                 .unwrap_or(Value::Null),
-            Column::Nlink => Value::Int(i64::from(self.stat()?.stx_nlink)),
-            Column::Inode => Value::Int(i64::try_from(self.stat()?.stx_ino).unwrap_or(i64::MAX)),
-            Column::Dev => {
-                let stat = self.stat()?;
-                Value::Int(
-                    i64::try_from(makedev(stat.stx_dev_major, stat.stx_dev_minor))
-                        .unwrap_or(i64::MAX),
-                )
-            }
-            Column::Atime => {
-                let t = self.stat()?.stx_atime;
-                timestamp(t.tv_sec, t.tv_nsec)
-            }
-            Column::Mtime => {
-                let t = self.stat()?.stx_mtime;
-                timestamp(t.tv_sec, t.tv_nsec)
-            }
-            Column::Ctime => {
-                let t = self.stat()?.stx_ctime;
-                timestamp(t.tv_sec, t.tv_nsec)
-            }
-            Column::Btime => {
-                let stat = self.stat()?;
-                if stat.stx_mask & StatxFlags::BTIME.bits() != 0 {
-                    timestamp(stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec)
-                } else {
-                    Value::Null
-                }
-            }
+            Column::Nlink => int(self.stat()?.nlink),
+            Column::Inode => int(self.stat()?.ino),
+            Column::Dev => int(self.stat()?.dev),
+            Column::Atime => timestamp(self.stat()?.atime),
+            Column::Mtime => timestamp(self.stat()?.mtime),
+            Column::Ctime => self.stat()?.ctime.map(timestamp).unwrap_or(Value::Null),
+            Column::Btime => self.stat()?.btime.map(timestamp).unwrap_or(Value::Null),
             Column::Target => self.target()?.map(from_bytes).unwrap_or(Value::Null),
             Column::Broken => self.broken()?.map(Value::Bool).unwrap_or(Value::Null),
         })
@@ -432,6 +373,7 @@ mod tests {
         assert_eq!(perms(0o1776), "rwxrwxrwT");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn makedev_matches_the_kernel_encoding() {
         assert_eq!(makedev(8, 1), 0x801);
