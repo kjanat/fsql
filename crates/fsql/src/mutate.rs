@@ -749,6 +749,10 @@ fn relocate(pinned: &Pinned, dir: &Dir, name: &Name, path: &Path) -> Result<Pinn
     sys::relocate(pinned, dir, name).map_err(|e| io(path, e))
 }
 
+fn sync_entry(dir: &Dir, name: &Name, path: &Path) -> Result<()> {
+    sys::sync_entry(dir, name).map_err(|e| io(path, e))
+}
+
 fn home(path: &Path) -> &Path {
     path.parent().unwrap_or(path)
 }
@@ -901,7 +905,7 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                 }
                 identity = Some(expected);
                 if journal.is_some() {
-                    sys::sync_fs(&dirfd).map_err(|e| io(&path, e))?;
+                    sync_entry(&dirfd, &name, &path)?;
                 }
                 synchronized = true;
             }
@@ -1057,7 +1061,7 @@ fn apply_insert_observed(
             }
             recorded_identity = Some(identity);
             if journal.is_some() {
-                sys::sync_fs(&dirfd).map_err(|e| io(&entry.path, e))?;
+                sync_entry(&dirfd, &name, &entry.path)?;
             }
             synchronized = true;
             work
@@ -1198,7 +1202,7 @@ fn restore_update(
             after.mtime.and(before.mtime),
         )?;
     }
-    sys::sync_fs(&dirfd).map_err(|e| io(original, e))
+    sync_entry(&dirfd, &name, original)
 }
 
 fn restore_insert(path: &Path, kind: Kind, recorded: Identity) -> Result<()> {
@@ -1276,10 +1280,8 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
         };
         match step {
             Ok(()) => {
-                if let Some(parent) = path.parent() {
-                    let dir = open_chain(parent)?;
-                    sys::sync_fs(&dir).map_err(|e| io(&path, e))?;
-                }
+                let (dir, name) = split(&path)?;
+                sync_entry(&dir, &name, &path)?;
                 journal::finish_undo(base, id, record.seq())?;
                 outcome.applied += 1;
             }

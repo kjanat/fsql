@@ -156,6 +156,8 @@ fsql reads columns lazily. A query that touches only `path` and `kind` never cal
 
 fsql runs on Linux, macOS and Windows. Linux reads `/proc/self/mountinfo` and the POSIX ACL extended attributes.
 
+On Linux, a journaled step synchronizes the whole filesystem before fsql records it. On macOS and Windows, fsql flushes the changed entry and its directory instead. It cannot flush the data of a file that it cannot open: an unreadable file on macOS, or a read-only file on Windows.
+
 On macOS, `mounts` lists the volumes that the system reports, and `mnt_id` is NULL. `acls` lists the NFSv4 ACL entries, with `perms` such as `allow:read,write`.
 
 On Windows:

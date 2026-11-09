@@ -179,8 +179,8 @@ impl Step {
                 journal::sync_dir(from.parent().expect("parent"))?;
                 // Moving an existing file must persist its data as well as its
                 // name, including dirty bytes written before this statement.
-                let destination = open_chain(to.parent().expect("parent"))?;
-                sys::sync_fs(&destination).map_err(|e| io(to, e))
+                let (destination, name) = split(to)?;
+                sys::sync_entry(&destination, &name).map_err(|e| io(to, e))
             }
             Self::Attributes {
                 path: p,
@@ -224,7 +224,7 @@ impl Step {
                     atime.then_some(after.atime),
                     (before.mtime != after.mtime).then_some(after.mtime),
                 )?;
-                sys::sync_fs(&parent).map_err(|e| io(p, e))?;
+                sys::sync_entry(&parent, &name).map_err(|e| io(p, e))?;
                 checkpoint("times-applied");
                 if !after.matches(&Snapshot::required(p)?) {
                     return Err(Error::Stale(p.to_owned()));
@@ -492,8 +492,8 @@ fn build(
                 return Err(error);
             }
             let object = Snapshot::required(&prepared.path)?;
-            let parent = open_chain(stage)?;
-            sys::sync_fs(&parent).map_err(|e| io(stage, e))?;
+            let (parent, name) = split(&prepared.path)?;
+            sys::sync_entry(&parent, &name).map_err(|e| io(stage, e))?;
             checkpoint("object-prepared");
             steps.push(Step::Move {
                 from: bytes(&prepared.path),

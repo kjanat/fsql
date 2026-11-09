@@ -593,15 +593,31 @@ pub fn is_empty_dir(dir: &Dir, name: &Name) -> io::Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn sync_fs(dir: &Dir) -> io::Result<()> {
+pub fn sync_entry(dir: &Dir, _name: &Name) -> io::Result<()> {
     Ok(rustix::fs::syncfs(&dir.0)?)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn sync_fs(dir: &Dir) -> io::Result<()> {
-    Ok(rustix::fs::fsync(&dir.0)?)
+pub fn sync_entry(dir: &Dir, name: &Name) -> io::Result<()> {
+    match rustix::fs::openat(
+        &dir.0,
+        &name.0,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => File::from(fd).sync_all()?,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::ACCESS | rustix::io::Errno::LOOP) => {}
+        Err(errno) => return Err(errno.into()),
+    }
+    sync_dir(dir)
 }
 
+#[cfg(target_vendor = "apple")]
+pub fn sync_dir(dir: &Dir) -> io::Result<()> {
+    Ok(rustix::fs::fcntl_fullfsync(&dir.0)?)
+}
+
+#[cfg(not(target_vendor = "apple"))]
 pub fn sync_dir(dir: &Dir) -> io::Result<()> {
     Ok(rustix::fs::fsync(&dir.0)?)
 }

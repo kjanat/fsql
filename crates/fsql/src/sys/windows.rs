@@ -486,7 +486,16 @@ pub fn sync_dir(dir: &Dir) -> io::Result<()> {
     sync_dir_path(&dir.path)
 }
 
-pub fn sync_fs(dir: &Dir) -> io::Result<()> {
+pub fn sync_entry(dir: &Dir, name: &Name) -> io::Result<()> {
+    match open_handle(&child(dir, name), GENERIC_WRITE, false) {
+        Ok(file) => file.sync_all()?,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) => {}
+        Err(error) => return Err(error),
+    }
     sync_dir(dir)
 }
 
