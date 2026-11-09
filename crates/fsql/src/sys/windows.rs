@@ -55,10 +55,7 @@ impl Name {
     }
 }
 
-pub struct Pinned {
-    path: PathBuf,
-    file: File,
-}
+pub struct Pinned(File);
 
 fn child(dir: &Dir, name: &Name) -> PathBuf {
     dir.path.join(&name.0)
@@ -226,15 +223,7 @@ fn ticks_to_nanos(ticks: u64) -> i64 {
         .saturating_mul(NANOS_PER_TICK)
 }
 
-fn executable(path: &Path) -> bool {
-    path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
-        ["exe", "bat", "cmd", "com"]
-            .iter()
-            .any(|known| ext.eq_ignore_ascii_case(known))
-    })
-}
-
-fn stat_handle(file: &File, path: &Path) -> io::Result<Stat> {
+fn stat_handle(file: &File) -> io::Result<Stat> {
     let metadata = file.metadata()?;
     let information = winapi_util::file::information(file)?;
     let attributes = metadata.file_attributes();
@@ -250,11 +239,7 @@ fn stat_handle(file: &File, path: &Path) -> io::Result<Stat> {
         (Kind::Symlink, _) => 0o777,
         (_, false) => 0o666,
         (_, true) => 0o444,
-    } | if kind == Kind::Dir || (kind == Kind::File && executable(path)) {
-        0o111
-    } else {
-        0
-    };
+    } | if kind == Kind::Dir { 0o111 } else { 0 };
     let kind_bits = match kind {
         Kind::Dir => 0o040000,
         Kind::Symlink => 0o120000,
@@ -280,8 +265,7 @@ fn stat_handle(file: &File, path: &Path) -> io::Result<Stat> {
 }
 
 pub fn stat_path(path: &Path, follow: bool) -> io::Result<Stat> {
-    let file = open_handle(path, FILE_READ_ATTRIBUTES, follow)?;
-    stat_handle(&file, path)
+    stat_handle(&open_handle(path, FILE_READ_ATTRIBUTES, follow)?)
 }
 
 pub fn stat_at(dir: &Dir, name: &Name) -> io::Result<Stat> {
@@ -298,7 +282,7 @@ pub fn stat_entry(
 }
 
 pub fn stat_file(file: &File) -> io::Result<Stat> {
-    stat_handle(file, Path::new(""))
+    stat_handle(file)
 }
 
 pub fn readlink_path(path: &Path) -> io::Result<Vec<u8>> {
@@ -318,26 +302,25 @@ pub fn readlink_entry(
 }
 
 pub fn pin(dir: &Dir, name: &Name) -> io::Result<Pinned> {
-    let path = child(dir, name);
-    let file = open_handle(&path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, false)?;
-    Ok(Pinned { path, file })
+    Ok(Pinned(open_handle(
+        &child(dir, name),
+        FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+        false,
+    )?))
 }
 
-pub fn pin_file(file: &File, dir: &Dir, name: &Name) -> io::Result<Pinned> {
-    Ok(Pinned {
-        path: child(dir, name),
-        file: file.try_clone()?,
-    })
+pub fn pin_file(file: &File, _dir: &Dir, _name: &Name) -> io::Result<Pinned> {
+    Ok(Pinned(file.try_clone()?))
 }
 
 pub fn stat_pinned(pinned: &Pinned) -> io::Result<Stat> {
-    stat_handle(&pinned.file, &pinned.path)
+    stat_handle(&pinned.0)
 }
 
 pub fn set_mode(pinned: &Pinned, mode: u32) -> io::Result<()> {
-    let mut permissions = pinned.file.metadata()?.permissions();
+    let mut permissions = pinned.0.metadata()?.permissions();
     permissions.set_readonly(mode & 0o222 == 0);
-    pinned.file.set_permissions(permissions)
+    pinned.0.set_permissions(permissions)
 }
 
 pub fn set_owner(_pinned: &Pinned, owner: &super::Owner) -> io::Result<()> {
@@ -367,7 +350,7 @@ pub fn set_times(pinned: &Pinned, atime: Option<i64>, mtime: Option<i64>) -> io:
     if let Some(mtime) = mtime {
         times = times.set_modified(system_time(mtime));
     }
-    pinned.file.set_times(times)
+    pinned.0.set_times(times)
 }
 
 fn is_directory_link(path: &Path) -> io::Result<bool> {
@@ -687,7 +670,7 @@ mod tests {
             .expect("file");
         let stat = stat_path(&file, false).expect("stat");
         assert!(stat.hidden);
-        assert_eq!(stat.mode & 0o777, 0o555);
+        assert_eq!(stat.mode & 0o777, 0o444);
         assert!(stat.ino != 0);
         assert!(Accounts::default().user(&file, &stat).is_some());
         std::fs::remove_dir_all(&dir).expect("cleanup");

@@ -1675,6 +1675,17 @@ mod tests {
     }
 
     #[test]
+    fn renaming_a_file_to_an_executable_extension_round_trips() {
+        let fx = Fixture::new("executable-name");
+        let (outcome, id) = fx.run("update files set name = 'keep.exe' where name = 'keep.rs'");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(fx.exists("src/keep.exe"));
+        let undone = undo(&fx.base, &id).expect("undo");
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert!(fx.exists("src/keep.rs"));
+    }
+
+    #[test]
     fn copied_tombstones_keep_attributes() {
         let fx = Fixture::new("copy");
         let file = fx.at("src/keep.rs");

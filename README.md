@@ -160,7 +160,7 @@ On macOS, `mounts` lists the volumes that the system reports, and `mnt_id` is NU
 
 On Windows:
 
-- `mode` and `perms` come from the read-only attribute. Files show `0o666`, or `0o444` when read-only. Directories, and files ending in `.exe`, `.bat`, `.cmd` or `.com`, add `0o111`. Setting `mode` sets or clears the read-only attribute.
+- `mode` and `perms` come from the read-only attribute. Files show `0o666`, or `0o444` when read-only. Directories add `0o111`. Setting `mode` sets or clears the read-only attribute.
 - `uid`, `gid`, `blocks` and `ctime` are NULL. `btime` is the creation time. `inode` is the NTFS file index and `dev` the volume serial number.
 - `user` and `group` name the owner and primary group of the security descriptor as `DOMAIN\name`. Assigning `user`, `group`, `uid` or `gid` fails.
 - `hidden` is also true for entries with the hidden attribute.
