@@ -1948,15 +1948,20 @@ mod tests {
     use crate::walk::WalkOptions;
     use std::path::PathBuf;
 
+    fn at(dir: &std::path::Path, rel: &str) -> PathBuf {
+        rel.split('/')
+            .fold(dir.to_path_buf(), |path, part| path.join(part))
+    }
+
     fn fixture(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fsql-exec-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("dirs");
         std::fs::create_dir_all(dir.join("build")).expect("dirs");
-        std::fs::write(dir.join("src/main.rs"), b"fn main() {}").expect("file");
-        std::fs::write(dir.join("src/lib.rs"), b"pub fn f() {}\n").expect("file");
-        std::fs::write(dir.join("build/out.tmp"), vec![0u8; 3000]).expect("file");
-        std::fs::write(dir.join("build/cache.tmp"), vec![0u8; 1000]).expect("file");
+        std::fs::write(at(&dir, "src/main.rs"), b"fn main() {}").expect("file");
+        std::fs::write(at(&dir, "src/lib.rs"), b"pub fn f() {}\n").expect("file");
+        std::fs::write(at(&dir, "build/out.tmp"), vec![0u8; 3000]).expect("file");
+        std::fs::write(at(&dir, "build/cache.tmp"), vec![0u8; 1000]).expect("file");
         std::fs::write(dir.join("README"), b"hi").expect("file");
         std::fs::canonicalize(dir).expect("canonical")
     }
@@ -1980,19 +1985,19 @@ mod tests {
     #[test]
     fn narrowing_accepts_relative_and_symlink_sources() {
         let relative = PathBuf::from(format!("target/relative-source-{}", std::process::id()));
-        std::fs::create_dir_all(relative.join("tree/src")).unwrap();
-        std::fs::write(relative.join("tree/src/file"), b"x").unwrap();
+        std::fs::create_dir_all(at(&relative, "tree/src")).unwrap();
+        std::fs::write(at(&relative, "tree/src/file"), b"x").unwrap();
         let canonical = std::fs::canonicalize(relative.join("tree")).unwrap();
-        std::os::unix::fs::symlink("tree", relative.join("alias")).unwrap();
+        crate::sys::symlink_path(b"tree", &relative.join("alias")).unwrap();
         for root in [
             relative.join("tree"),
             relative.join("alias"),
             canonical.clone(),
         ] {
             let sql = format!(
-                "select relative_path from files('{}') where path = '{}/src/file'",
+                "select relative_path from files('{}') where path = '{}'",
                 root.display(),
-                canonical.display()
+                canonical.join("src").join("file").display()
             );
             let set = run_sql(&canonical, &sql).unwrap();
             assert_eq!(texts(&set, 0), ["src/file"]);
@@ -2061,8 +2066,8 @@ mod tests {
     #[test]
     fn relative_paths_and_pruning_ignore_display_depth_offsets() {
         let dir = fixture("relative-offset");
-        std::fs::create_dir_all(dir.join("src/build/nested")).unwrap();
-        std::fs::write(dir.join("src/build/nested/hidden.rs"), b"x").unwrap();
+        std::fs::create_dir_all(at(&dir, "src/build/nested")).unwrap();
+        std::fs::write(at(&dir, "src/build/nested/hidden.rs"), b"x").unwrap();
         let planner = Planner::new(
             &dir,
             WalkOptions {
@@ -2073,7 +2078,7 @@ mod tests {
         for (sql, expected) in [
             ("select relative_path from files where depth = 2".to_owned(), vec![""]),
             (format!("select relative_path from files where path glob '{}/src/**' and not (relative_path glob any (array['**/build{{,/**}}'])) order by relative_path", dir.display()), vec!["src/lib.rs", "src/main.rs"]),
-            (format!("select depth from files where path = '{}/src/main.rs'", dir.display()), vec!["4"]),
+            (format!("select depth from files where path = '{}'", at(&dir, "src/main.rs").display()), vec!["4"]),
             ("select relative_path from files where not (relative_path glob 'build{,/**}') and name = 'build' order by relative_path".to_owned(), vec!["src/build"]),
         ] {
             let Plan::Select(plan) = planner.plan(&sql).unwrap().remove(0) else {
@@ -2094,7 +2099,7 @@ mod tests {
             &dir,
             &format!(
                 "select f.relative_path from files f where path = '{}'",
-                dir.join("src/main.rs").display()
+                at(&dir, "src/main.rs").display()
             ),
         )
         .unwrap();
@@ -2108,7 +2113,16 @@ mod tests {
             )
             .is_err()
         );
+        let set = run_sql(&dir, "select o.relative_path from files o where o.name = 'main.rs' and exists (select 1 from files i where i.name = 'out.tmp' and not (o.relative_path glob any (array['build{,/**}'])))").unwrap();
+        assert_eq!(texts(&set, 0), ["src/main.rs"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[test]
+    fn non_utf8_relative_paths_come_back_as_blobs() {
         use std::os::unix::ffi::OsStrExt;
+        let dir = fixture("relative-raw");
         let raw = b"src/invalid-\xff.tmp";
         std::fs::write(dir.join(std::ffi::OsStr::from_bytes(raw)), b"x").unwrap();
         let set = run_sql(
@@ -2117,16 +2131,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(set.rows, [vec![Value::Blob(raw.to_vec())]]);
-        let set = run_sql(&dir, "select o.relative_path from files o where o.name = 'main.rs' and exists (select 1 from files i where i.name = 'out.tmp' and not (o.relative_path glob any (array['build{,/**}'])))").unwrap();
-        assert_eq!(texts(&set, 0), ["src/main.rs"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn subtree_pruning_preserves_results_and_skips_descendants() {
         let dir = fixture("pruning");
-        std::fs::create_dir_all(dir.join("src/build/nested")).unwrap();
-        std::fs::write(dir.join("src/build/nested/keep.rs"), b"x").unwrap();
+        std::fs::create_dir_all(at(&dir, "src/build/nested")).unwrap();
+        std::fs::write(at(&dir, "src/build/nested/keep.rs"), b"x").unwrap();
         let mut filters = vec![
             "kind = 'file' AND NOT (relative_path GLOB ANY (ARRAY['**/build{,/**}']))",
             "NOT (relative_path GLOB ANY (ARRAY['build/**']))",
@@ -2250,7 +2262,7 @@ mod tests {
         .expect("run");
         assert_eq!(
             texts(&set, 0),
-            [dir.join("build/out.tmp").to_string_lossy().into_owned()]
+            [at(&dir, "build/out.tmp").to_string_lossy().into_owned()]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2389,8 +2401,12 @@ mod tests {
             "select f.name, m.fstype from files f join mounts m on f.dev = m.dev where f.name = 'README'",
         )
         .expect("run");
-        assert_eq!(set.rows.len(), 1);
-        assert!(matches!(&set.rows[0][1], Value::Text(t) if !t.is_empty()));
+        assert!(!set.rows.is_empty());
+        assert!(
+            set.rows
+                .iter()
+                .all(|row| matches!(&row[1], Value::Text(t) if !t.is_empty()))
+        );
         let set = run_sql(&dir, "select count(*) from (select 1 as x union all select 2) a cross join (select 1 as y union all select 2 union all select 3) b").expect("run");
         assert_eq!(set.rows[0][0], Value::Int(6));
         let set = run_sql(

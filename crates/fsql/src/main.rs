@@ -65,7 +65,8 @@ struct Cli {
     #[arg(long)]
     no_journal: bool,
 
-    /// Directory for journals. Defaults to $XDG_DATA_HOME/fsql/journal
+    /// Directory for journals. Defaults to $XDG_DATA_HOME/fsql/journal, or
+    /// %LOCALAPPDATA%\fsql\journal on Windows
     #[arg(long, value_name = "DIR")]
     journal_dir: Option<PathBuf>,
 

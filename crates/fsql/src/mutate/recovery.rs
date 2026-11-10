@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 fn bytes(path: &Path) -> Vec<u8> {
-    path.as_os_str().as_bytes().to_vec()
+    path_bytes(path)
 }
-fn path(bytes: &[u8]) -> &Path {
-    Path::new(OsStr::from_bytes(bytes))
+fn path(bytes: &[u8]) -> PathBuf {
+    path_from_bytes(bytes)
 }
 fn save<T: Serialize>(file: &Path, value: &T) -> Result<()> {
     journal::atomic_write(
@@ -39,8 +39,8 @@ struct Snapshot {
     birth: Option<i64>,
     kind: String,
     mode: u32,
-    uid: u32,
-    gid: u32,
+    uid: Option<u32>,
+    gid: Option<u32>,
     size: u64,
     mtime: i64,
     atime: i64,
@@ -49,32 +49,26 @@ struct Snapshot {
 impl Snapshot {
     fn get(p: &Path) -> Result<Option<Self>> {
         let (parent, name) = split(p)?;
-        let stat = match rustix::fs::statx(&parent, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK) {
+        let stat = match sys::stat_at(&parent, &name) {
             Ok(stat) => stat,
-            Err(Errno::NOENT) => return Ok(None),
+            Err(e) if sys::not_found(&e) => return Ok(None),
             Err(e) => return Err(io(p, e)),
         };
-        let kind = Kind::from_mode(u32::from(stat.stx_mode));
-        let target = if kind == Kind::Symlink {
-            Some(
-                rustix::fs::readlinkat(&parent, &name, Vec::new())
-                    .map_err(|e| io(p, e))?
-                    .into_bytes(),
-            )
+        let target = if stat.kind == Kind::Symlink {
+            Some(sys::readlink_at(&parent, &name).map_err(|e| io(p, e))?)
         } else {
             None
         };
         Ok(Some(Self {
             identity: Identity::of(&stat),
-            birth: (stat.stx_mask & rustix::fs::StatxFlags::BTIME.bits() != 0)
-                .then(|| time::from_parts(stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec).0),
-            kind: kind.as_str().into(),
-            mode: u32::from(stat.stx_mode) & 0o7777,
-            uid: stat.stx_uid,
-            gid: stat.stx_gid,
-            size: stat.stx_size,
-            mtime: time::from_parts(stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec).0,
-            atime: time::from_parts(stat.stx_atime.tv_sec, stat.stx_atime.tv_nsec).0,
+            birth: sys::identity_birth(&stat),
+            kind: stat.kind.as_str().into(),
+            mode: stat.mode & 0o7777,
+            uid: stat.uid,
+            gid: stat.gid,
+            size: stat.size,
+            mtime: stat.mtime,
+            atime: stat.atime,
             target,
         }))
     }
@@ -98,6 +92,10 @@ impl Snapshot {
             && self.gid == other.gid
             && (self.kind == "dir" || self.mtime == other.mtime)
     }
+}
+
+fn between<T: PartialEq>(current: T, before: T, after: T) -> bool {
+    current == before || current == after
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +150,7 @@ impl Step {
                 empty,
             } => {
                 let (from, to) = (path(from), path(to));
+                let (from, to) = (from.as_path(), to.as_path());
                 match (Snapshot::get(from)?, Snapshot::get(to)?) {
                     (None, Some(found)) if object.matches(&found) => {}
                     (Some(found), None) if object.matches(&found) => {
@@ -180,8 +179,8 @@ impl Step {
                 journal::sync_dir(from.parent().expect("parent"))?;
                 // Moving an existing file must persist its data as well as its
                 // name, including dirty bytes written before this statement.
-                let destination = open_chain(to.parent().expect("parent"))?;
-                rustix::fs::syncfs(&destination).map_err(|e| io(to, e))
+                let (destination, name) = split(to)?;
+                sys::sync_entry(&destination, &name).map_err(|e| io(to, e))
             }
             Self::Attributes {
                 path: p,
@@ -190,8 +189,8 @@ impl Step {
                 atime,
             } => {
                 let p = path(p);
+                let p = p.as_path();
                 let current = Snapshot::required(p)?;
-                let between = |n, a, b| n == a || n == b;
                 if !before.same_object(&current)
                     || !(between(current.mode, before.mode, after.mode)
                         || ((before.uid != after.uid || before.gid != after.gid)
@@ -207,33 +206,25 @@ impl Step {
                 }
                 let (parent, name) = split(p)?;
                 let pinned = pin(&parent, &name, p)?;
-                let stat = rustix::fs::statx(
-                    &pinned,
-                    c"",
-                    AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
-                    STATX_MASK,
-                )
-                .map_err(|e| io(p, e))?;
+                let stat = stat_pinned(&pinned, p)?;
                 if Identity::of(&stat) != current.identity {
                     return Err(Error::Stale(p.to_owned()));
                 }
-                let empty = c"".to_owned();
                 if current.uid != after.uid || current.gid != after.gid {
-                    set_owner(&pinned, &empty, p, Some(after.uid), Some(after.gid))?;
+                    set_owner(&pinned, p, after.uid, after.gid)?;
                     checkpoint("owner-applied");
                 }
                 if current.kind != "symlink" {
-                    set_mode(&pinned, &empty, p, kind_of(&current.kind), after.mode)?;
+                    set_mode(&pinned, p, after.mode)?;
                     checkpoint("mode-applied");
                 }
                 set_times(
                     &pinned,
-                    &empty,
                     p,
                     atime.then_some(after.atime),
                     (before.mtime != after.mtime).then_some(after.mtime),
                 )?;
-                rustix::fs::syncfs(&parent).map_err(|e| io(p, e))?;
+                sys::sync_entry(&parent, &name).map_err(|e| io(p, e))?;
                 checkpoint("times-applied");
                 if !after.matches(&Snapshot::required(p)?) {
                     return Err(Error::Stale(p.to_owned()));
@@ -302,7 +293,7 @@ fn finish(
         } => {
             let identity = observed
                 .get(p)
-                .ok_or_else(|| Error::Stale(path(p).to_owned()))?
+                .ok_or_else(|| Error::Stale(path(p)))?
                 .identity;
             *dev = identity.dev;
             *ino = identity.ino;
@@ -316,17 +307,17 @@ fn finish(
         } => {
             let current = after.path.as_ref().unwrap_or(p);
             let found = if op.steps.is_empty() {
-                let found = Snapshot::required(path(current))?;
+                let found = Snapshot::required(&path(current))?;
                 if !identity
                     .is_some_and(|expected| found.identity.matches(&expected, kind_of(&found.kind)))
                 {
-                    return Err(Error::Stale(path(current).to_owned()));
+                    return Err(Error::Stale(path(current)));
                 }
                 found.identity
             } else {
                 observed
                     .get(current)
-                    .ok_or_else(|| Error::Stale(path(current).to_owned()))?
+                    .ok_or_else(|| Error::Stale(path(current)))?
                     .identity
             };
             *identity = Some(found);
@@ -375,7 +366,7 @@ fn execute(dir: &Path, op: &Operation, undo: bool) -> Result<()> {
     }
     let mut observed = std::collections::BTreeMap::new();
     for (p, expected) in final_objects {
-        let actual = Snapshot::get(path(p))?;
+        let actual = Snapshot::get(&path(p))?;
         if !match (expected, actual) {
             (None, None) => true,
             (Some(expected), Some(actual)) if expected.matches(&actual) => {
@@ -384,7 +375,7 @@ fn execute(dir: &Path, op: &Operation, undo: bool) -> Result<()> {
             }
             _ => false,
         } {
-            return Err(Error::Stale(path(p).to_owned()));
+            return Err(Error::Stale(path(p)));
         }
     }
     if undo {
@@ -426,9 +417,9 @@ fn stage_dir(journal: &Journal, seq: u64, parent: &Path) -> Result<PathBuf> {
         },
     )?;
     checkpoint("prepare-recorded");
-    let fd = open_chain(parent)?;
-    let name = c_name(stage.file_name().expect("stage name"), &stage)?;
-    rustix::fs::mkdirat(&fd, &name, Mode::from_raw_mode(0o700)).map_err(|e| io(&stage, e))?;
+    let dir = open_chain(parent)?;
+    let name = sys::name_of(stage.file_name().expect("stage name"), &stage)?;
+    sys::private_dir(&dir, &name).map_err(|e| io(&stage, e))?;
     journal::sync_dir(parent)?;
     checkpoint("stage-created");
     save(
@@ -494,14 +485,15 @@ fn build(
                 return Err(Error::Stale(entry.path.clone()));
             }
             let mut prepared = entry.clone();
+            prepared.link_parent = entry.path.parent().map(Path::to_path_buf);
             prepared.path = stage.join("new");
             let out = apply_insert(std::slice::from_ref(&prepared), None)?;
             if let Some((_, error)) = out.failures.into_iter().next() {
                 return Err(error);
             }
             let object = Snapshot::required(&prepared.path)?;
-            let parent = open_chain(stage)?;
-            rustix::fs::syncfs(&parent).map_err(|e| io(stage, e))?;
+            let (parent, name) = split(&prepared.path)?;
+            sys::sync_entry(&parent, &name).map_err(|e| io(stage, e))?;
             checkpoint("object-prepared");
             steps.push(Step::Move {
                 from: bytes(&prepared.path),
@@ -547,8 +539,8 @@ fn build(
             }
             if let Some(link) = &attrs.target {
                 let new = stage.join("new");
-                std::os::unix::fs::symlink(OsStr::from_bytes(link), &new)
-                    .map_err(|e| std_io(&new, e))?;
+                let destination = attrs.path.as_deref().map_or_else(|| p.to_path_buf(), path);
+                sys::symlink_from(link, &new, home(&destination)).map_err(|e| std_io(&new, e))?;
                 journal::sync_dir(stage)?;
                 let prepared = Snapshot::required(&new)?;
                 steps.push(Step::Move {
@@ -566,14 +558,17 @@ fn build(
                 object = prepared;
             }
             let mut after = object.clone();
-            after.uid = attrs.uid.unwrap_or(after.uid);
-            after.gid = attrs.gid.unwrap_or(after.gid);
+            after.uid = attrs.uid.or(after.uid);
+            after.gid = attrs.gid.or(after.gid);
             if attrs.uid.is_some() || attrs.gid.is_some() {
                 after.mode &= !0o6000;
             }
-            after.mode = attrs.mode.unwrap_or(after.mode);
-            after.atime = attrs.atime.unwrap_or(after.atime);
-            after.mtime = attrs.mtime.unwrap_or(after.mtime);
+            after.mode = attrs
+                .mode
+                .map(|mode| sys::applied_mode(object.mode, mode))
+                .unwrap_or(after.mode);
+            after.atime = attrs.atime.map(sys::file_time).unwrap_or(after.atime);
+            after.mtime = attrs.mtime.map(sys::file_time).unwrap_or(after.mtime);
             if !object.matches(&after) || attrs.atime.is_some() {
                 steps.push(Step::Attributes {
                     path: bytes(p),
@@ -583,10 +578,10 @@ fn build(
                 });
             }
             if let Some(destination) = &attrs.path
-                && path(destination) != p
+                && path(destination) != *p
             {
-                if Snapshot::get(path(destination))?.is_some() {
-                    return Err(Error::Stale(path(destination).to_owned()));
+                if Snapshot::get(&path(destination))?.is_some() {
+                    return Err(Error::Stale(path(destination)));
                 }
                 steps.push(Step::Move {
                     from: bytes(p),
@@ -603,8 +598,8 @@ fn build(
                     kind: original.kind.clone(),
                     before: Attrs {
                         mode: Some(original.mode),
-                        uid: Some(original.uid),
-                        gid: Some(original.gid),
+                        uid: original.uid,
+                        gid: original.gid,
                         atime: Some(original.atime),
                         mtime: Some(original.mtime),
                         path: Some(bytes(p)),
@@ -714,7 +709,7 @@ fn clean_preparations(dir: &Path) -> Result<()> {
             .trim_end_matches(".json");
         if !dir.join(format!("replay-{seq}.json")).exists() {
             let preparation: Preparation = read(&entry.path())?;
-            clean_stage(path(&preparation.stage), preparation.identity, None)?;
+            clean_stage(&path(&preparation.stage), preparation.identity, None)?;
         }
         remove_file(&entry.path())?;
     }
@@ -728,7 +723,7 @@ fn clean_stage(stage: &Path, identity: Option<Identity>, op: Option<&Operation>)
     if found.kind != "dir" || identity.is_some_and(|i| !found.identity.matches(&i, Kind::Dir)) {
         return Err(Error::Stale(stage.to_owned()));
     }
-    let _pinned = open_chain(stage)?;
+    let pinned = open_chain(stage)?;
     let entries = match fs::read_dir(stage) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -760,6 +755,7 @@ fn clean_stage(stage: &Path, identity: Option<Identity>, op: Option<&Operation>)
         journal::sync_dir(stage)?;
         checkpoint("stage-object-removed");
     }
+    drop(pinned);
     fs::remove_dir(stage).map_err(|e| std_io(stage, e))?;
     checkpoint("stage-removed");
     journal::sync_dir(stage.parent().expect("stage parent"))
@@ -800,7 +796,7 @@ fn recover_locked(dir: &Path) -> Result<Outcome> {
         match execute(dir, &op, false) {
             Ok(()) => out.applied += 1,
             Err(e) => {
-                out.failures.push((path(&op.path).to_owned(), e));
+                out.failures.push((path(&op.path), e));
                 out.recovery_required.push(dir.to_owned());
                 break;
             }
@@ -845,9 +841,9 @@ fn verify_undo(dir: &Path, op: &Operation) -> Result<()> {
         } => (after.path.unwrap_or(path), identity, kind),
         Record::Delete { .. } => return Ok(()),
     };
-    let current = Snapshot::required(path(&p))?;
+    let current = Snapshot::required(&path(&p))?;
     if !expected.is_some_and(|e| current.identity.matches(&e, kind_of(&kind))) {
-        return Err(Error::Stale(path(&p).to_owned()));
+        return Err(Error::Stale(path(&p)));
     }
     Ok(())
 }
@@ -870,16 +866,16 @@ fn inverse_steps(dir: &Path, op: &Operation) -> Result<Vec<Step>> {
             Step::Move {
                 from, to, object, ..
             } => {
-                let source = Snapshot::get(path(from))?;
+                let source = Snapshot::get(&path(from))?;
                 if source.as_ref().is_some_and(|found| object.matches(found)) {
                     // A refused rename has not moved our source; an unrelated
                     // destination requires no inverse and remains untouched.
                 } else if source.is_none()
-                    && Snapshot::get(path(to))?.is_some_and(|found| object.matches(&found))
+                    && Snapshot::get(&path(to))?.is_some_and(|found| object.matches(&found))
                 {
                     applied.push(step.inverse());
                 } else {
-                    return Err(Error::Stale(path(&op.path).to_owned()));
+                    return Err(Error::Stale(path(&op.path)));
                 }
             }
             Step::Attributes {
@@ -888,7 +884,7 @@ fn inverse_steps(dir: &Path, op: &Operation) -> Result<Vec<Step>> {
                 atime,
                 ..
             } => {
-                let current = Snapshot::required(path(p))?;
+                let current = Snapshot::required(&path(p))?;
                 if !before.matches(&current) || (*atime && before.atime != current.atime) {
                     // The inverse validates every field against the before and
                     // after images before touching the pinned object.
@@ -917,12 +913,12 @@ fn undo_locked(base: &Path, id: &str) -> Result<Outcome> {
                 execute(&dir, &op, true)?;
                 checkpoint("undo-recorded");
             }
-            clean_stage(path(&op.stage), Some(op.stage_identity), Some(&op))
+            clean_stage(&path(&op.stage), Some(op.stage_identity), Some(&op))
         })();
         match result {
             Ok(()) => out.applied += 1,
             Err(e) => {
-                out.failures.push((path(&op.path).to_owned(), e));
+                out.failures.push((path(&op.path), e));
                 out.recovery_required.push(dir.clone());
                 return Ok(out);
             }
@@ -938,23 +934,51 @@ fn undo_locked(base: &Path, id: &str) -> Result<Outcome> {
 mod tests {
     use super::*;
     use crate::walk::{WalkOptions, Walker};
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn set_mode(path: &Path, mode: u32) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(mode & 0o222 == 0);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn mode(path: &Path) -> u32 {
+        sys::stat_path(path, true).unwrap().mode & 0o777
+    }
+
+    #[cfg(unix)]
+    fn file_mode(mode: u32) -> u32 {
+        mode
+    }
+
+    #[cfg(windows)]
+    fn file_mode(mode: u32) -> u32 {
+        if mode & 0o222 == 0 { 0o444 } else { 0o666 }
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "fsql-replay-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+            let root = fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join(format!(
+                    "fsql-replay-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
             fs::create_dir_all(root.join("tree/dir")).unwrap();
             fs::write(root.join("tree/file"), b"original bytes").unwrap();
-            fs::set_permissions(root.join("tree/file"), fs::Permissions::from_mode(0o640)).unwrap();
-            std::os::unix::fs::symlink("file", root.join("tree/link")).unwrap();
+            set_mode(&root.join("tree/file"), 0o640);
+            sys::symlink_path(b"file", &root.join("tree/link")).unwrap();
             Self(root)
         }
         fn tree(&self) -> PathBuf {
@@ -990,10 +1014,7 @@ mod tests {
                 fs::read(self.tree().join("file")).unwrap(),
                 b"original bytes"
             );
-            assert_eq!(
-                fs::metadata(self.tree().join("file")).unwrap().mode() & 0o777,
-                0o640
-            );
+            assert_eq!(mode(&self.tree().join("file")), file_mode(0o640));
             assert_eq!(
                 fs::read_link(self.tree().join("link")).unwrap(),
                 Path::new("file")
@@ -1151,9 +1172,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn denied_forward_step_can_be_rolled_back() {
-        if rustix::process::geteuid().is_root() {
+        if sys::effective_root() {
             return;
         }
         let fx = Fixture::new();
@@ -1269,7 +1291,7 @@ mod tests {
     fn undo_reverts_prior_steps_when_a_rename_destination_becomes_occupied() {
         let fx = Fixture::new();
         let planner = Planner::new(fx.tree(), WalkOptions::default());
-        let sql = "update files set mode = 0o600, name = 'renamed' where name = 'file'";
+        let sql = "update files set mode = 0o400, name = 'renamed' where name = 'file'";
         let resolved = resolve(
             &planner
                 .plan(sql)
@@ -1294,10 +1316,7 @@ mod tests {
         let out = apply(&resolved, &mut log).unwrap();
         CRASH.with(|c| *c.borrow_mut() = None);
         assert_eq!(out.failures.len(), 1);
-        assert_eq!(
-            fs::metadata(fx.tree().join("file")).unwrap().mode() & 0o777,
-            0o600
-        );
+        assert_eq!(mode(&fx.tree().join("file")), file_mode(0o400));
         assert!(undo(&fx.base(), log.id()).unwrap().failures.is_empty());
         assert_eq!(fs::read(&destination).unwrap(), b"unrelated");
         fs::remove_file(destination).unwrap();
@@ -1316,7 +1335,7 @@ mod tests {
             .unwrap();
         assert_eq!(rows.rows[0][0], Value::Int(0));
         let ops = operations(&fx.base().join(fx.id())).unwrap();
-        assert!(Walker::new(path(&ops[0].stage), WalkOptions::default()).is_err());
+        assert!(Walker::new(&path(&ops[0].stage), WalkOptions::default()).is_err());
         let reserved = format!(
             "insert into files(path) values ('{}/.fsql-abc-def-0')",
             fx.tree().display()
@@ -1344,10 +1363,11 @@ mod tests {
         fx.original();
     }
 
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn recovery_paths_preserve_non_utf8_filenames() {
         let fx = Fixture::new();
-        let original = fx.tree().join(OsStr::from_bytes(b"bytes-\xff"));
+        let original = fx.tree().join(sys::os_from_bytes(b"bytes-\xff"));
         fs::rename(fx.tree().join("file"), &original).unwrap();
         let planner = Planner::new(fx.tree(), WalkOptions::default());
         let sql = "delete from files where kind = 'file'";

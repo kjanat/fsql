@@ -1,8 +1,5 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
 
 use globset::{GlobMatcher, GlobSet};
 
@@ -302,7 +299,7 @@ impl Evaluator {
                 let bytes = text_bytes(&subject)
                     .ok_or_else(|| Error::Plan("GLOB subject must be text or bytes".into()))?;
                 return Ok(Value::Bool(
-                    set.is_match(Path::new(OsStr::from_bytes(&bytes))),
+                    set.is_match(crate::sys::path_from_bytes(&bytes)),
                 ));
             }
         }
@@ -521,7 +518,7 @@ impl Evaluator {
         }
         let matcher = &self.globs[pattern_text];
         Ok(Value::Bool(
-            matcher.is_match(Path::new(OsStr::from_bytes(&bytes))),
+            matcher.is_match(crate::sys::path_from_bytes(&bytes)),
         ))
     }
 
@@ -728,13 +725,15 @@ impl Evaluator {
                 }
                 let bytes =
                     text_bytes(&args[0]).ok_or_else(|| mismatch(&name, &args[0], &Value::Null))?;
-                let path = Path::new(OsStr::from_bytes(&bytes));
+                let path = crate::sys::path_from_bytes(&bytes);
                 let part = match name.as_str() {
-                    "basename" => path.file_name().map(OsStr::as_bytes),
-                    "dirname" => path.parent().map(|p| p.as_os_str().as_bytes()),
-                    _ => path.extension().map(OsStr::as_bytes),
+                    "basename" => path.file_name(),
+                    "dirname" => path.parent().map(std::path::Path::as_os_str),
+                    _ => path.extension(),
                 };
-                Ok(part.map(from_bytes).unwrap_or(Value::Null))
+                Ok(part
+                    .map(|part| from_bytes(&crate::sys::os_bytes(part)))
+                    .unwrap_or(Value::Null))
             }
             "human" | "format_size" => {
                 arity(1)?;

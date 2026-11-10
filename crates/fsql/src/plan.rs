@@ -969,19 +969,35 @@ fn hint(term: &Expr) -> Option<Hint> {
             negated: false,
             expr,
             pattern,
-            escape_char: None,
+            escape_char,
             ..
         } if is_column(expr, Column::Path) => {
-            let pattern = string_literal(pattern)?;
-            let end = pattern.find(['%', '_']).unwrap_or(pattern.len());
-            Some(Hint::Prefix(pattern[..end].to_owned()))
+            let escape = match escape_char.as_deref() {
+                None => None,
+                Some(text) => {
+                    let mut chars = string_literal(text)?.chars();
+                    let escape = chars.next()?;
+                    if chars.next().is_some() || !escape.is_ascii() {
+                        return None;
+                    }
+                    Some(escape)
+                }
+            };
+            Some(Hint::Prefix(like_prefix(string_literal(pattern)?, escape)))
         }
         Expr::BinaryOp { left, op, right } => match op {
             BinaryOperator::Glob if is_column(left, Column::Path) => {
                 let pattern = string_literal(right)?;
-                let end = pattern
-                    .find(['*', '?', '[', '{', '\\'])
-                    .unwrap_or(pattern.len());
+                let start = crate::sys::VERBATIM_PREFIXES
+                    .iter()
+                    .find_map(|prefix| pattern.strip_prefix(prefix).map(|_| prefix.len()))
+                    .unwrap_or(0);
+                let end = pattern[start..]
+                    .find(|c| {
+                        matches!(c, '*' | '?' | '[' | '{')
+                            || (c == '\\' && !std::path::is_separator(c))
+                    })
+                    .map_or(pattern.len(), |end| start + end);
                 Some(Hint::Prefix(pattern[..end].to_owned()))
             }
             BinaryOperator::Eq if is_column(left, Column::Path) => {
@@ -1026,30 +1042,34 @@ fn hint(term: &Expr) -> Option<Hint> {
     }
 }
 
+fn like_prefix(pattern: &str, escape: Option<char>) -> String {
+    let mut prefix = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if Some(c) == escape {
+            match chars.next() {
+                Some(literal) => prefix.push(literal),
+                None => break,
+            }
+        } else if matches!(c, '%' | '_') {
+            break;
+        } else {
+            prefix.push(c);
+        }
+    }
+    prefix
+}
+
 fn hint_directory(hint: &Hint) -> Option<PathBuf> {
+    let (Hint::Prefix(text) | Hint::Exact(text) | Hint::Parent(text)) = hint;
+    let path = crate::sys::native_path(text);
+    if !path.is_absolute() {
+        return None;
+    }
     match hint {
-        Hint::Prefix(prefix) => {
-            if !prefix.starts_with('/') {
-                return None;
-            }
-            if let Some(dir) = prefix.strip_suffix('/') {
-                Some(PathBuf::from(if dir.is_empty() { "/" } else { dir }))
-            } else {
-                Path::new(prefix).parent().map(Path::to_path_buf)
-            }
-        }
-        Hint::Exact(path) => {
-            if !path.starts_with('/') {
-                return None;
-            }
-            Path::new(path).parent().map(Path::to_path_buf)
-        }
-        Hint::Parent(dir) => {
-            if !dir.starts_with('/') {
-                return None;
-            }
-            Some(PathBuf::from(dir))
-        }
+        Hint::Prefix(prefix) if prefix.ends_with(std::path::is_separator) => Some(path),
+        Hint::Parent(_) => Some(path),
+        Hint::Prefix(_) | Hint::Exact(_) => path.parent().map(Path::to_path_buf),
     }
 }
 
@@ -1318,9 +1338,23 @@ mod tests {
     fn path_prefixes_narrow_the_walk_root() {
         let dir = fixture("narrow");
         let display = dir.display();
+        let literal: String = display
+            .to_string()
+            .chars()
+            .flat_map(|c| match c {
+                '%' | '_' | '!' => vec!['!', c],
+                other => vec![other],
+            })
+            .collect();
         let cases = [
-            (format!("path like '{display}/a/b/%'"), Some(("a/b", 2))),
-            (format!("path like '{display}/a/b%'"), Some(("a", 1))),
+            (
+                format!("path like '{literal}/a/b/%' escape '!'"),
+                Some(("a/b", 2)),
+            ),
+            (
+                format!("path like '{literal}/a/b%' escape '!'"),
+                Some(("a", 1)),
+            ),
             (
                 format!("path glob '{display}/a/**/*.rs' and size > 1"),
                 Some(("a", 1)),
@@ -1331,15 +1365,26 @@ mod tests {
             ),
             (format!("path = '{display}/a/b/c/file'"), Some(("a/b/c", 3))),
             (format!("parent = '{display}/a'"), Some(("a", 1))),
-            (format!("path like '{display}/%'"), None),
-            (format!("path like '{display}/a/%' or ext = 'x'"), None),
-            (format!("path not like '{display}/a/%'"), None),
+            (format!("path like '{literal}/%' escape '!'"), None),
+            (format!("path like '{display}/a/b/%' escape 'é'"), None),
+            (
+                format!("path like '{literal}/a/%' escape '!' or ext = 'x'"),
+                None,
+            ),
+            (format!("path not like '{literal}/a/%' escape '!'"), None),
             ("path like '/nonexistent/%'".to_owned(), None),
             ("ext = 'tmp'".to_owned(), None),
         ];
         for (sql, expected) in cases {
             let result = narrow(&dir, &parse_filter(&sql));
-            let expected = expected.map(|(suffix, depth)| (dir.join(suffix), depth));
+            let expected = expected.map(|(suffix, depth): (&str, u32)| {
+                (
+                    suffix
+                        .split('/')
+                        .fold(dir.clone(), |path, part| path.join(part)),
+                    depth,
+                )
+            });
             assert_eq!(result, expected, "{sql}");
         }
         let _ = std::fs::remove_dir_all(&dir);

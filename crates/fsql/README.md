@@ -26,7 +26,7 @@ fsql undo ID    # reverse one
 fsql recover ID # finish an interrupted apply or undo
 ```
 
-Without `--apply`, `DELETE`, `UPDATE` and `INSERT` print the entries they would change and change nothing. With `--apply`, fsql refuses a statement that touches more than `--cap` entries (10000 by default) and journals the rest under `$XDG_DATA_HOME/fsql/journal`. `--no-journal` applies without a journal, and fsql cannot undo the result.
+Without `--apply`, `DELETE`, `UPDATE` and `INSERT` print the entries they would change and change nothing. With `--apply`, fsql refuses a statement that touches more than `--cap` entries (10000 by default) and journals the rest under `$XDG_DATA_HOME/fsql/journal`, or `%LOCALAPPDATA%\fsql\journal` on Windows. `--no-journal` applies without a journal, and fsql cannot undo the result.
 
 `--max-rows`, `--max-bytes`, `--max-work` and `--timeout SECONDS` bound a query. `--best-effort` returns the readable rows of a `SELECT` when some entries cannot be read, and exits with status 1 when it skipped entries.
 

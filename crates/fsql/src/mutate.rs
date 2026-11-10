@@ -1,14 +1,6 @@
 use std::cmp::Reverse;
-use std::ffi::{CString, OsStr};
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-
-use rustix::fs::{
-    AtFlags, CWD, Dir, Gid, Mode, OFlags, RenameFlags, Timespec, Timestamps, UTIME_OMIT, Uid,
-    XattrFlags,
-};
-use rustix::io::Errno;
 
 use crate::column::Column;
 use crate::error::{Error, Result};
@@ -16,11 +8,11 @@ use crate::eval::{Evaluator, Row, render};
 use crate::exec::{self, Aliased, compare_keys};
 use crate::journal::{self, Attrs, Journal, Record};
 use crate::plan::{self, InsertColumn, InsertPlan, InsertRows, OrderKey, Plan, Planner, Set};
-use crate::row::{Entry, Frozen, Identity, Kind, STATX_MASK};
+use crate::row::{Entry, Frozen, Identity, Kind};
+use crate::sys::{self, Dir, Name, Owner, Pinned, open_chain, path_bytes, path_from_bytes, split};
 use crate::time;
 use crate::value::Value;
-use crate::walk::{c_name, open_chain, validate_path};
-use crate::xattr;
+use crate::walk::validate_path;
 
 mod recovery;
 pub use recovery::recover;
@@ -28,8 +20,8 @@ pub use recovery::recover;
 #[derive(Debug, Clone)]
 pub struct Before {
     pub mode: u32,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
     pub atime: i64,
     pub mtime: i64,
     pub size: u64,
@@ -66,6 +58,7 @@ pub struct NewEntry {
     pub mtime: Option<i64>,
     pub source: Option<PathBuf>,
     source_identity: Option<Identity>,
+    link_parent: Option<PathBuf>,
     pub content: Option<Vec<u8>>,
 }
 
@@ -127,18 +120,12 @@ pub struct Outcome {
     pub recovery_required: Vec<PathBuf>,
 }
 
-fn io(path: &Path, errno: Errno) -> Error {
-    Error::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::from(errno),
-    }
+fn io(path: &Path, source: std::io::Error) -> Error {
+    sys::io(path, source)
 }
 
 fn std_io(path: &Path, source: std::io::Error) -> Error {
-    Error::Io {
-        path: path.to_path_buf(),
-        source,
-    }
+    sys::io(path, source)
 }
 
 fn skippable(_error: &Error) -> bool {
@@ -340,27 +327,17 @@ fn before(entry: &Entry) -> Result<Before> {
         _ => None,
     };
     Ok(Before {
-        mode: u32::from(stat.stx_mode),
-        uid: stat.stx_uid,
-        gid: stat.stx_gid,
-        atime: time::from_parts(stat.stx_atime.tv_sec, stat.stx_atime.tv_nsec).0,
-        mtime: time::from_parts(stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec).0,
-        size: stat.stx_size,
+        mode: stat.mode,
+        uid: stat.uid,
+        gid: stat.gid,
+        atime: stat.atime,
+        mtime: stat.mtime,
+        size: stat.size,
         target,
     })
 }
 
-fn user_id(name: &[u8]) -> Result<u32> {
-    uzers::get_user_by_name(OsStr::from_bytes(name))
-        .map(|user| user.uid())
-        .ok_or_else(|| Error::Plan(format!("unknown user `{}`", String::from_utf8_lossy(name))))
-}
-
-fn group_id(name: &[u8]) -> Result<u32> {
-    uzers::get_group_by_name(OsStr::from_bytes(name))
-        .map(|group| group.gid())
-        .ok_or_else(|| Error::Plan(format!("unknown group `{}`", String::from_utf8_lossy(name))))
-}
+use sys::{group_id, user_id};
 
 fn change(evaluator: &mut Evaluator, set: &Set, row: &dyn Row, frozen: &Frozen) -> Result<Change> {
     let value = evaluator.eval(&set.value, row)?;
@@ -379,7 +356,7 @@ fn change(evaluator: &mut Evaluator, set: &Set, row: &dyn Row, frozen: &Frozen) 
         Column::Atime => Change::Atime(nanos(&value, "atime")?),
         Column::Mtime => Change::Mtime(nanos(&value, "mtime")?),
         Column::Path => {
-            let path = PathBuf::from(OsStr::from_bytes(&bytes(&value, "path")?));
+            let path = sys::native_path_bytes(&bytes(&value, "path")?);
             if !path.is_absolute() {
                 return Err(Error::Plan(format!(
                     "new path `{}` must be absolute",
@@ -391,16 +368,16 @@ fn change(evaluator: &mut Evaluator, set: &Set, row: &dyn Row, frozen: &Frozen) 
         }
         Column::Name => {
             let name = bytes(&value, "name")?;
-            if name.is_empty() || name.contains(&b'/') || name == b"." || name == b".." {
+            let Some(name) = sys::file_name(&name) else {
                 return Err(Error::Plan(format!(
                     "`{}` is not a valid file name",
                     String::from_utf8_lossy(&name)
                 )));
-            }
-            Change::Rename(frozen.parent.join(OsStr::from_bytes(&name)))
+            };
+            Change::Rename(frozen.parent.join(name))
         }
         Column::Parent => {
-            let parent = PathBuf::from(OsStr::from_bytes(&bytes(&value, "parent")?));
+            let parent = sys::native_path_bytes(&bytes(&value, "parent")?);
             if !parent.is_absolute() {
                 return Err(Error::Plan(format!(
                     "new parent `{}` must be absolute",
@@ -476,6 +453,7 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
         mtime: None,
         source: None,
         source_identity: None,
+        link_parent: None,
         content: None,
     };
     let mut kind_given = false;
@@ -488,7 +466,7 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
         }
         match column {
             InsertColumn::Column(Column::Path) => {
-                entry.path = PathBuf::from(OsStr::from_bytes(&bytes(value, "path")?));
+                entry.path = sys::native_path_bytes(&bytes(value, "path")?);
             }
             InsertColumn::Column(Column::Kind) => {
                 kind_given = true;
@@ -512,7 +490,7 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
             InsertColumn::Column(Column::Atime) => entry.atime = Some(nanos(value, "atime")?),
             InsertColumn::Column(Column::Mtime) => entry.mtime = Some(nanos(value, "mtime")?),
             InsertColumn::Source => {
-                entry.source = Some(PathBuf::from(OsStr::from_bytes(&bytes(value, "source")?)));
+                entry.source = Some(sys::native_path_bytes(&bytes(value, "source")?));
             }
             InsertColumn::Content => entry.content = Some(bytes(value, "content")?),
             InsertColumn::Column(other) => {
@@ -538,10 +516,9 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
                 source.display()
             )));
         }
-        let stat = rustix::fs::statx(CWD, source, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
-            .map_err(|e| io(source, e))?;
+        let stat = sys::stat_path(source, false).map_err(|e| io(source, e))?;
         entry.source_identity = Some(Identity::of(&stat));
-        let source_kind = Kind::from_mode(u32::from(stat.stx_mode));
+        let source_kind = stat.kind;
         if !kind_given {
             entry.kind = source_kind;
         } else if entry.kind != source_kind {
@@ -553,12 +530,10 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
             )));
         }
         if entry.mode.is_none() {
-            entry.mode = Some(u32::from(stat.stx_mode) & 0o7777);
+            entry.mode = Some(stat.mode & 0o7777);
         }
         if entry.kind == Kind::Symlink && entry.target.is_none() {
-            let target =
-                rustix::fs::readlinkat(CWD, source, Vec::new()).map_err(|e| io(source, e))?;
-            entry.target = Some(target.into_bytes());
+            entry.target = Some(sys::readlink_path(source).map_err(|e| io(source, e))?);
         }
     }
     if entry.content.is_some() && entry.kind != Kind::File {
@@ -583,15 +558,14 @@ fn new_entry(plan: &InsertPlan, row: &[Value]) -> Result<NewEntry> {
     Ok(entry)
 }
 
-fn check(frozen: &Frozen) -> Result<(OwnedFd, CString)> {
-    let dirfd = open_chain(&frozen.parent)?;
-    let name = c_name(&frozen.name, &frozen.path)?;
-    let stat = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
-        .map_err(|e| io(&frozen.path, e))?;
+fn check(frozen: &Frozen) -> Result<(Dir, Name)> {
+    let dir = open_chain(&frozen.parent)?;
+    let name = sys::name_of(&frozen.name, &frozen.path)?;
+    let stat = sys::stat_at(&dir, &name).map_err(|e| io(&frozen.path, e))?;
     if !Identity::of(&stat).matches(&frozen.identity, frozen.kind) {
         return Err(Error::Stale(frozen.path.clone()));
     }
-    Ok((dirfd, name))
+    Ok((dir, name))
 }
 
 fn verify_all(targets: &[Target]) -> Result<()> {
@@ -629,55 +603,12 @@ pub fn apply(resolved: &Resolved, journal: Option<&mut Journal>) -> Result<Outco
     }
 }
 
-fn unlink(dirfd: &OwnedFd, name: &CString, kind: Kind, path: &Path) -> Result<()> {
-    let flags = if kind == Kind::Dir {
-        AtFlags::REMOVEDIR
-    } else {
-        AtFlags::empty()
-    };
-    rustix::fs::unlinkat(dirfd, name, flags).map_err(|e| io(path, e))
+fn unlink(dir: &Dir, name: &Name, kind: Kind, path: &Path) -> Result<()> {
+    sys::unlink(dir, name, kind).map_err(|e| io(path, e))
 }
 
-fn open_read(dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<std::fs::File> {
-    let fd = rustix::fs::openat(
-        dirfd,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| io(path, e))?;
-    Ok(std::fs::File::from(fd))
-}
-
-fn copy_attributes(from: &std::fs::File, from_path: &Path, to: &std::fs::File) -> Result<()> {
-    let stat = rustix::fs::statx(from, c"", AtFlags::EMPTY_PATH, STATX_MASK)
-        .map_err(|e| io(from_path, e))?;
-    rustix::fs::fchmod(to, Mode::from_raw_mode(u32::from(stat.stx_mode) & 0o7777))
-        .map_err(|e| io(from_path, e))?;
-    let _ = rustix::fs::fchown(
-        to,
-        Some(Uid::from_raw(stat.stx_uid)),
-        Some(Gid::from_raw(stat.stx_gid)),
-    );
-    for name in xattr::names(from_path)? {
-        if let Some(value) = xattr::value(from_path, &name)? {
-            match rustix::fs::fsetxattr(to, OsStr::from_bytes(&name), &value, XattrFlags::empty()) {
-                Ok(()) | Err(Errno::OPNOTSUPP | Errno::PERM | Errno::ACCESS) => {}
-                Err(e) => return Err(io(from_path, e)),
-            }
-        }
-    }
-    let times = Timestamps {
-        last_access: Timespec {
-            tv_sec: stat.stx_atime.tv_sec,
-            tv_nsec: i64::from(stat.stx_atime.tv_nsec),
-        },
-        last_modification: Timespec {
-            tv_sec: stat.stx_mtime.tv_sec,
-            tv_nsec: i64::from(stat.stx_mtime.tv_nsec),
-        },
-    };
-    rustix::fs::futimens(to, &times).map_err(|e| io(from_path, e))
+fn open_read(dir: &Dir, name: &Name, path: &Path) -> Result<std::fs::File> {
+    sys::open_read(dir, name).map_err(|e| io(path, e))
 }
 
 fn copy_file(
@@ -687,12 +618,12 @@ fn copy_file(
     sink_path: &Path,
 ) -> Result<()> {
     std::io::copy(&mut source, &mut sink).map_err(|e| std_io(sink_path, e))?;
-    copy_attributes(&source, source_path, &sink)?;
+    sys::copy_attributes(&source, source_path, &sink)?;
     sink.sync_all().map_err(|e| std_io(sink_path, e))
 }
 
-fn move_out(dirfd: &OwnedFd, name: &CString, path: &Path, tomb: &Path) -> Result<()> {
-    let source = open_read(dirfd, name, path)?;
+fn move_out(dir: &Dir, name: &Name, path: &Path, tomb: &Path) -> Result<()> {
+    let source = open_read(dir, name, path)?;
     let tomb_dir = open_chain(tomb.parent().expect("tomb parent"))?;
     let sink = std::fs::OpenOptions::new()
         .write(true)
@@ -700,7 +631,7 @@ fn move_out(dirfd: &OwnedFd, name: &CString, path: &Path, tomb: &Path) -> Result
         .open(tomb)
         .map_err(|e| std_io(tomb, e))?;
     copy_and_remove(source, path, sink, tomb, &tomb_dir, || {
-        unlink(dirfd, name, Kind::File, path)
+        unlink(dir, name, Kind::File, path)
     })
 }
 
@@ -709,26 +640,20 @@ fn copy_and_remove(
     source_path: &Path,
     sink: std::fs::File,
     sink_path: &Path,
-    destination_dir: &OwnedFd,
+    destination_dir: &Dir,
     remove_source: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     copy_file(source, source_path, sink, sink_path)?;
     // Persist both the bytes and their directory entry before removing the
     // only other copy. A pending journal intent cannot recover lost bytes.
-    rustix::fs::fsync(destination_dir).map_err(|e| io(sink_path, e))?;
+    sys::sync_dir(destination_dir).map_err(|e| io(sink_path, e))?;
     remove_source()
 }
 
-fn move_in(tomb: &Path, dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<()> {
+fn move_in(tomb: &Path, dir: &Dir, name: &Name, path: &Path) -> Result<()> {
     let source = std::fs::File::open(tomb).map_err(|e| std_io(tomb, e))?;
-    let fd = rustix::fs::openat(
-        dirfd,
-        name,
-        OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::from_raw_mode(0o600),
-    )
-    .map_err(|e| io(path, e))?;
-    copy_and_remove(source, tomb, std::fs::File::from(fd), path, dirfd, || {
+    let sink = sys::create(dir, name, 0o600).map_err(|e| io(path, e))?;
+    copy_and_remove(source, tomb, sink, path, dir, || {
         std::fs::remove_file(tomb).map_err(|e| std_io(tomb, e))
     })
 }
@@ -758,11 +683,11 @@ fn apply_delete(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
             let tomb = journal.tomb_path(seq);
             let record = Record::Delete {
                 seq,
-                path: frozen.path.as_os_str().as_bytes().to_vec(),
+                path: path_bytes(&frozen.path),
                 kind: frozen.kind.as_str().to_owned(),
                 mode: target.before.mode,
                 target: target.before.target.clone(),
-                tomb: (frozen.kind == Kind::File).then(|| tomb.as_os_str().as_bytes().to_vec()),
+                tomb: (frozen.kind == Kind::File).then(|| path_bytes(&tomb)),
                 dev: frozen.identity.dev,
                 ino: frozen.identity.ino,
                 ctime: frozen.identity.ctime,
@@ -773,14 +698,17 @@ fn apply_delete(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                     unlink(&dirfd, &name, Kind::Dir, &frozen.path)?;
                     None
                 }
-                Kind::File => match rustix::fs::renameat(&dirfd, &name, CWD, &tomb) {
-                    Ok(()) => Some(tomb.as_os_str().as_bytes().to_vec()),
-                    Err(Errno::XDEV) => {
-                        move_out(&dirfd, &name, &frozen.path, &tomb)?;
-                        Some(tomb.as_os_str().as_bytes().to_vec())
+                Kind::File => {
+                    let (tomb_dir, tomb_name) = split(&tomb)?;
+                    match sys::rename_replace(&dirfd, &name, &tomb_dir, &tomb_name) {
+                        Ok(()) => Some(path_bytes(&tomb)),
+                        Err(e) if sys::is_cross_device(&e) => {
+                            move_out(&dirfd, &name, &frozen.path, &tomb)?;
+                            Some(path_bytes(&tomb))
+                        }
+                        Err(e) => return Err(io(&frozen.path, e)),
                     }
-                    Err(e) => return Err(io(&frozen.path, e)),
-                },
+                }
                 _ => {
                     unlink(&dirfd, &name, frozen.kind, &frozen.path)?;
                     None
@@ -809,137 +737,82 @@ fn apply_delete(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
     Ok(outcome)
 }
 
-fn timespec(nanos: i64) -> Timespec {
-    Timespec {
-        tv_sec: nanos.div_euclid(time::NANOS_PER_SECOND),
-        tv_nsec: nanos.rem_euclid(time::NANOS_PER_SECOND),
-    }
+fn set_times(pinned: &Pinned, path: &Path, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
+    sys::set_times(pinned, atime, mtime).map_err(|e| io(path, e))
 }
 
-fn omit() -> Timespec {
-    Timespec {
-        tv_sec: 0,
-        tv_nsec: UTIME_OMIT,
-    }
+fn pin(dir: &Dir, name: &Name, path: &Path) -> Result<Pinned> {
+    sys::pin(dir, name).map_err(|e| io(path, e))
 }
 
-fn set_times(
-    dirfd: &OwnedFd,
-    name: &CString,
-    path: &Path,
-    atime: Option<i64>,
-    mtime: Option<i64>,
-) -> Result<()> {
-    let times = Timestamps {
-        last_access: atime.map(timespec).unwrap_or_else(omit),
-        last_modification: mtime.map(timespec).unwrap_or_else(omit),
-    };
-    let fd = pin(dirfd, name, path)?;
-    rustix::fs::utimensat(
-        &fd,
-        c"",
-        &times,
-        AtFlags::SYMLINK_NOFOLLOW | AtFlags::EMPTY_PATH,
-    )
-    .map_err(|e| io(path, e))
+fn relocate(pinned: &Pinned, dir: &Dir, name: &Name, path: &Path) -> Result<Pinned> {
+    sys::relocate(pinned, dir, name).map_err(|e| io(path, e))
 }
 
-fn pin(dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<OwnedFd> {
-    if name.as_bytes().is_empty() {
-        return rustix::io::dup(dirfd).map_err(|e| io(path, e));
-    }
-    rustix::fs::openat(
-        dirfd,
-        name,
-        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| io(path, e))
+fn sync_entry(dir: &Dir, name: &Name, path: &Path) -> Result<()> {
+    sys::sync_entry(dir, name).map_err(|e| io(path, e))
 }
 
-fn set_mode(dirfd: &OwnedFd, name: &CString, path: &Path, _kind: Kind, mode: u32) -> Result<()> {
-    let fd = pin(dirfd, name, path)?;
-    let stat = rustix::fs::statx(
-        &fd,
-        c"",
-        AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
-        STATX_MASK,
-    )
-    .map_err(|e| io(path, e))?;
-    if Kind::from_mode(u32::from(stat.stx_mode)) == Kind::Symlink {
+fn home(path: &Path) -> &Path {
+    path.parent().unwrap_or(path)
+}
+
+fn stat_pinned(pinned: &Pinned, path: &Path) -> Result<sys::Stat> {
+    sys::stat_pinned(pinned).map_err(|e| io(path, e))
+}
+
+fn set_mode(pinned: &Pinned, path: &Path, mode: u32) -> Result<()> {
+    if stat_pinned(pinned, path)?.kind == Kind::Symlink {
         return Err(Error::Plan(format!(
             "{} is a symlink, its mode cannot change",
             path.display()
         )));
     }
-    // rustix's chmodat does not implement fchmodat2. This Linux procfs magic
-    // link addresses our held O_PATH descriptor, never the mutable entry name.
-    let descriptor = format!("/proc/self/fd/{}", fd.as_raw_fd());
-    rustix::fs::chmodat(
-        CWD,
-        descriptor.as_str(),
-        Mode::from_raw_mode(mode & 0o7777),
-        AtFlags::empty(),
-    )
-    .map_err(|e| io(path, e))
+    sys::set_mode(pinned, mode).map_err(|e| io(path, e))
 }
 
-fn set_owner(
-    dirfd: &OwnedFd,
-    name: &CString,
+fn set_owner(pinned: &Pinned, path: &Path, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
+    sys::set_owner(pinned, &Owner { uid, gid }).map_err(|e| io(path, e))
+}
+
+fn set_target(
+    dir: &Dir,
+    name: &Name,
     path: &Path,
-    uid: Option<u32>,
-    gid: Option<u32>,
-) -> Result<()> {
-    let fd = pin(dirfd, name, path)?;
-    rustix::fs::chownat(
-        &fd,
-        c"",
-        uid.map(Uid::from_raw),
-        gid.map(Gid::from_raw),
-        AtFlags::SYMLINK_NOFOLLOW | AtFlags::EMPTY_PATH,
-    )
-    .map_err(|e| io(path, e))
-}
-
-fn set_target(dirfd: &OwnedFd, name: &CString, path: &Path, target: &[u8]) -> Result<OwnedFd> {
+    target: &[u8],
+    destination: &Path,
+) -> Result<Pinned> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let temporary = CString::new(format!(
+    let temporary = format!(
         ".fsql-link-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ))
-    .expect("temporary name");
-    rustix::fs::symlinkat(OsStr::from_bytes(target), dirfd, &temporary).map_err(|e| io(path, e))?;
+    );
+    let temporary = sys::name_of(OsStr::new(&temporary), path)?;
+    sys::symlink(target, dir, &temporary, home(destination)).map_err(|e| io(path, e))?;
     let result = (|| {
-        let fd = pin(dirfd, &temporary, path)?;
-        rustix::fs::renameat(dirfd, &temporary, dirfd, name).map_err(|e| io(path, e))?;
-        Ok(fd)
+        let pinned = pin(dir, &temporary, path)?;
+        sys::rename_replace(dir, &temporary, dir, name).map_err(|e| io(path, e))?;
+        relocate(&pinned, dir, name, path)
     })();
     if result.is_err() {
-        let _ = rustix::fs::unlinkat(dirfd, &temporary, AtFlags::empty());
+        let _ = sys::unlink(dir, &temporary, Kind::Symlink);
     }
     result
 }
 
-fn rename(
-    dirfd: &OwnedFd,
-    name: &CString,
-    path: &Path,
-    destination: &Path,
-) -> Result<(OwnedFd, CString)> {
+fn rename(dir: &Dir, name: &Name, path: &Path, destination: &Path) -> Result<(Dir, Name)> {
     let (Some(parent), Some(new_name)) = (destination.parent(), destination.file_name()) else {
         return Err(Error::Plan(format!(
             "`{}` is not a valid destination",
             destination.display()
         )));
     };
-    let new_dirfd = open_chain(parent)?;
-    let new_name = c_name(new_name, destination)?;
-    rustix::fs::renameat_with(dirfd, name, &new_dirfd, &new_name, RenameFlags::NOREPLACE)
-        .map_err(|e| io(path, e))?;
-    Ok((new_dirfd, new_name))
+    let new_dir = open_chain(parent)?;
+    let new_name = sys::name_of(new_name, destination)?;
+    sys::rename_noreplace(dir, name, &new_dir, &new_name).map_err(|e| io(path, e))?;
+    Ok((new_dir, new_name))
 }
 
 fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result<Outcome> {
@@ -949,11 +822,11 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
         let frozen = &target.frozen;
         let before = Attrs {
             mode: Some(target.before.mode),
-            uid: Some(target.before.uid),
-            gid: Some(target.before.gid),
+            uid: target.before.uid,
+            gid: target.before.gid,
             atime: Some(target.before.atime),
             mtime: Some(target.before.mtime),
-            path: Some(frozen.path.as_os_str().as_bytes().to_vec()),
+            path: Some(path_bytes(&frozen.path)),
             target: target.before.target.clone(),
         };
         let seq = journal.as_ref().map(|j| j.next_seq()).unwrap_or(0);
@@ -965,10 +838,14 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                 Change::Gid(v) => intended.gid = Some(*v),
                 Change::Atime(v) => intended.atime = Some(*v),
                 Change::Mtime(v) => intended.mtime = Some(*v),
-                Change::Rename(v) => intended.path = Some(v.as_os_str().as_bytes().to_vec()),
+                Change::Rename(v) => intended.path = Some(path_bytes(v)),
                 Change::Target(v) => intended.target = Some(v.clone()),
             }
         }
+        let destination = intended
+            .path
+            .as_deref()
+            .map_or_else(|| frozen.path.clone(), path_from_bytes);
         let mut after = Attrs::default();
         let mut identity = None;
         let mut begun = false;
@@ -979,7 +856,7 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
             if let Some(journal) = journal.as_deref_mut() {
                 journal.begin(&Record::Update {
                     seq,
-                    path: frozen.path.as_os_str().as_bytes().to_vec(),
+                    path: path_bytes(&frozen.path),
                     kind: frozen.kind.as_str().into(),
                     before: before.clone(),
                     after: intended,
@@ -990,14 +867,7 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
             let mut expected = frozen.identity;
             for change in &target.changes {
                 let pinned = pin(&dirfd, &name, &path)?;
-                let empty = c"".to_owned();
-                let stat = rustix::fs::statx(
-                    &pinned,
-                    c"",
-                    AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
-                    STATX_MASK,
-                )
-                .map_err(|e| io(&path, e))?;
+                let stat = stat_pinned(&pinned, &path)?;
                 if !Identity::of(&stat).matches(&expected, frozen.kind) {
                     return Err(Error::Stale(path.clone()));
                 }
@@ -1005,23 +875,23 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                 let mut replacement = None;
                 match change {
                     Change::Mode(mode) => {
-                        set_mode(&pinned, &empty, &path, frozen.kind, *mode)?;
+                        set_mode(&pinned, &path, *mode)?;
                         after.mode = Some(*mode);
                     }
                     Change::Uid(uid) => {
-                        set_owner(&pinned, &empty, &path, Some(*uid), None)?;
+                        set_owner(&pinned, &path, Some(*uid), None)?;
                         after.uid = Some(*uid);
                     }
                     Change::Gid(gid) => {
-                        set_owner(&pinned, &empty, &path, None, Some(*gid))?;
+                        set_owner(&pinned, &path, None, Some(*gid))?;
                         after.gid = Some(*gid);
                     }
                     Change::Atime(t) => {
-                        set_times(&pinned, &empty, &path, Some(*t), None)?;
+                        set_times(&pinned, &path, Some(*t), None)?;
                         after.atime = Some(*t);
                     }
                     Change::Mtime(t) => {
-                        set_times(&pinned, &empty, &path, None, Some(*t))?;
+                        set_times(&pinned, &path, None, Some(*t))?;
                         after.mtime = Some(*t);
                     }
                     Change::Rename(destination) => {
@@ -1029,29 +899,23 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
                         dirfd = new_dirfd;
                         name = new_name;
                         path = destination.clone();
-                        after.path = Some(destination.as_os_str().as_bytes().to_vec());
+                        after.path = Some(path_bytes(destination));
+                        replacement = Some(relocate(&pinned, &dirfd, &name, &path)?);
                     }
                     Change::Target(target) => {
-                        replacement = Some(set_target(&dirfd, &name, &path, target)?);
+                        replacement = Some(set_target(&dirfd, &name, &path, target, &destination)?);
                         after.target = Some(target.clone());
                     }
                 }
-                let stat = rustix::fs::statx(
-                    replacement.as_ref().unwrap_or(&pinned),
-                    c"",
-                    AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
-                    STATX_MASK,
-                )
-                .map_err(|e| io(&path, e))?;
+                let stat = stat_pinned(replacement.as_ref().unwrap_or(&pinned), &path)?;
                 expected = Identity::of(&stat);
-                let named = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
-                    .map_err(|e| io(&path, e))?;
+                let named = sys::stat_at(&dirfd, &name).map_err(|e| io(&path, e))?;
                 if Identity::of(&named) != expected {
                     return Err(Error::Stale(path.clone()));
                 }
                 identity = Some(expected);
                 if journal.is_some() {
-                    rustix::fs::syncfs(&dirfd).map_err(|e| io(&path, e))?;
+                    sync_entry(&dirfd, &name, &path)?;
                 }
                 synchronized = true;
             }
@@ -1071,7 +935,7 @@ fn apply_update(targets: &[Target], mut journal: Option<&mut Journal>) -> Result
             }
             let record = Record::Update {
                 seq,
-                path: frozen.path.as_os_str().as_bytes().to_vec(),
+                path: path_bytes(&frozen.path),
                 kind: frozen.kind.as_str().to_owned(),
                 before: before.clone(),
                 after: after.clone(),
@@ -1124,8 +988,7 @@ fn apply_insert_observed(
                     Some(path) => {
                         let (parent, name) = split(path)?;
                         let file = open_read(&parent, &name, path)?;
-                        let stat = rustix::fs::statx(&file, c"", AtFlags::EMPTY_PATH, STATX_MASK)
-                            .map_err(|e| io(path, e))?;
+                        let stat = sys::stat_file(&file).map_err(|e| io(path, e))?;
                         if Some(Identity::of(&stat)) != entry.source_identity {
                             return Err(Error::Stale(path.clone()));
                         }
@@ -1139,7 +1002,7 @@ fn apply_insert_observed(
             if let Some(journal) = journal.as_deref_mut() {
                 journal.begin(&Record::Insert {
                     seq,
-                    path: entry.path.as_os_str().as_bytes().to_vec(),
+                    path: path_bytes(&entry.path),
                     kind: entry.kind.as_str().into(),
                     dev: 0,
                     ino: 0,
@@ -1149,33 +1012,20 @@ fn apply_insert_observed(
             }
             let mut file = match entry.kind {
                 Kind::Dir => {
-                    rustix::fs::mkdirat(
-                        &dirfd,
-                        &name,
-                        Mode::from_raw_mode(entry.mode.unwrap_or(0o755)),
-                    )
-                    .map_err(|e| io(&entry.path, e))?;
+                    sys::mkdir(&dirfd, &name, entry.mode.unwrap_or(0o755))
+                        .map_err(|e| io(&entry.path, e))?;
                     None
                 }
-                Kind::File => {
-                    let fd = rustix::fs::openat(
-                        &dirfd,
-                        &name,
-                        OFlags::CREATE
-                            | OFlags::EXCL
-                            | OFlags::WRONLY
-                            | OFlags::CLOEXEC
-                            | OFlags::NOFOLLOW,
-                        Mode::from_raw_mode(entry.mode.unwrap_or(0o644)),
-                    )
-                    .map_err(|e| io(&entry.path, e))?;
-                    Some(std::fs::File::from(fd))
-                }
+                Kind::File => Some(
+                    sys::create(&dirfd, &name, entry.mode.unwrap_or(0o644))
+                        .map_err(|e| io(&entry.path, e))?,
+                ),
                 Kind::Symlink => {
-                    rustix::fs::symlinkat(
-                        OsStr::from_bytes(entry.target.as_deref().unwrap_or(b"")),
+                    sys::symlink(
+                        entry.target.as_deref().unwrap_or(b""),
                         &dirfd,
                         &name,
+                        entry.link_parent.as_deref().unwrap_or(home(&entry.path)),
                     )
                     .map_err(|e| io(&entry.path, e))?;
                     None
@@ -1186,11 +1036,10 @@ fn apply_insert_observed(
             // Keep the created inode pinned through copying, attributes and
             // journaling. Resolving its name again could select a replacement.
             let pinned = match &file {
-                Some(file) => rustix::io::dup(file).map_err(|e| io(&entry.path, e))?,
+                Some(file) => sys::pin_file(file, &dirfd, &name).map_err(|e| io(&entry.path, e))?,
                 None => pin(&dirfd, &name, &entry.path)?,
             };
             after_create(&entry.path);
-            let empty = c"".to_owned();
             let work = (|| -> Result<()> {
                 if let Some(file) = file.as_mut() {
                     if let Some(content) = &entry.content {
@@ -1204,32 +1053,25 @@ fn apply_insert_observed(
                 if let Some(mode) = entry.mode
                     && entry.kind != Kind::Symlink
                 {
-                    set_mode(&pinned, &empty, &entry.path, entry.kind, mode)?;
+                    set_mode(&pinned, &entry.path, mode)?;
                 }
                 if entry.uid.is_some() || entry.gid.is_some() {
-                    set_owner(&pinned, &empty, &entry.path, entry.uid, entry.gid)?;
+                    set_owner(&pinned, &entry.path, entry.uid, entry.gid)?;
                 }
                 if entry.atime.is_some() || entry.mtime.is_some() {
-                    set_times(&pinned, &empty, &entry.path, entry.atime, entry.mtime)?;
+                    set_times(&pinned, &entry.path, entry.atime, entry.mtime)?;
                 }
                 Ok(())
             })();
-            let stat = rustix::fs::statx(
-                &pinned,
-                c"",
-                AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
-                STATX_MASK,
-            )
-            .map_err(|e| io(&entry.path, e))?;
+            let stat = stat_pinned(&pinned, &entry.path)?;
             let identity = Identity::of(&stat);
-            let named = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
-                .map_err(|e| io(&entry.path, e))?;
+            let named = sys::stat_at(&dirfd, &name).map_err(|e| io(&entry.path, e))?;
             if !Identity::of(&named).matches(&identity, entry.kind) {
                 return Err(Error::Stale(entry.path.clone()));
             }
             recorded_identity = Some(identity);
             if journal.is_some() {
-                rustix::fs::syncfs(&dirfd).map_err(|e| io(&entry.path, e))?;
+                sync_entry(&dirfd, &name, &entry.path)?;
             }
             synchronized = true;
             work
@@ -1241,7 +1083,7 @@ fn apply_insert_observed(
                 let logged = match recorded_identity {
                     Some(identity) if synchronized => journal.record(Record::Insert {
                         seq,
-                        path: entry.path.as_os_str().as_bytes().to_vec(),
+                        path: path_bytes(&entry.path),
                         kind: entry.kind.as_str().into(),
                         dev: identity.dev,
                         ino: identity.ino,
@@ -1272,13 +1114,6 @@ fn apply_insert_observed(
     Ok(outcome)
 }
 
-fn split(path: &Path) -> Result<(OwnedFd, CString)> {
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err(Error::Plan(format!("`{}` has no parent", path.display())));
-    };
-    Ok((open_chain(parent)?, c_name(name, path)?))
-}
-
 fn kind_of(text: &str) -> Kind {
     match text {
         "file" => Kind::File,
@@ -1292,23 +1127,8 @@ fn kind_of(text: &str) -> Kind {
     }
 }
 
-fn is_empty_dir(dirfd: &OwnedFd, name: &CString, path: &Path) -> Result<bool> {
-    let fd = rustix::fs::openat(
-        dirfd,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| io(path, e))?;
-    let entries = Dir::read_from(&fd).map_err(|e| io(path, e))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| io(path, e))?;
-        let bytes = entry.file_name().to_bytes();
-        if bytes != b"." && bytes != b".." {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+fn is_empty_dir(dir: &Dir, name: &Name, path: &Path) -> Result<bool> {
+    sys::is_empty_dir(dir, name).map_err(|e| io(path, e))
 }
 
 fn restore_delete(
@@ -1318,23 +1138,22 @@ fn restore_delete(
     target: Option<&[u8]>,
     tomb: Option<&Path>,
 ) -> Result<()> {
-    let (dirfd, name) = split(path)?;
+    let (dir, name) = split(path)?;
     match (tomb, kind) {
         (Some(tomb), _) => {
-            match rustix::fs::renameat_with(CWD, tomb, &dirfd, &name, RenameFlags::NOREPLACE) {
+            let (tomb_dir, tomb_name) = split(tomb)?;
+            match sys::rename_noreplace(&tomb_dir, &tomb_name, &dir, &name) {
                 Ok(()) => Ok(()),
-                Err(Errno::XDEV) => move_in(tomb, &dirfd, &name, path),
+                Err(e) if sys::is_cross_device(&e) => move_in(tomb, &dir, &name, path),
                 Err(e) => Err(io(path, e)),
             }
         }
         (None, Kind::Dir) => {
-            rustix::fs::mkdirat(&dirfd, &name, Mode::from_raw_mode(mode & 0o7777))
-                .map_err(|e| io(path, e))?;
-            set_mode(&dirfd, &name, path, Kind::Dir, mode)
+            sys::mkdir(&dir, &name, mode & 0o7777).map_err(|e| io(path, e))?;
+            set_mode(&pin(&dir, &name, path)?, path, mode)
         }
         (None, Kind::Symlink) => {
-            rustix::fs::symlinkat(OsStr::from_bytes(target.unwrap_or(b"")), &dirfd, &name)
-                .map_err(|e| io(path, e))
+            sys::symlink(target.unwrap_or(b""), &dir, &name, home(path)).map_err(|e| io(path, e))
         }
         (None, other) => Err(Error::Plan(format!("cannot recreate a {}", other.as_str()))),
     }
@@ -1350,21 +1169,14 @@ fn restore_update(
     let current = after
         .path
         .as_deref()
-        .map(|p| PathBuf::from(OsStr::from_bytes(p)))
+        .map(path_from_bytes)
         .unwrap_or_else(|| original.to_path_buf());
     let (mut dirfd, mut name) = split(&current)?;
     let expected = identity.ok_or_else(|| {
         Error::Plan("legacy update journal lacks identity; automatic undo refused".into())
     })?;
     let mut pinned = pin(&dirfd, &name, &current)?;
-    let empty = c"".to_owned();
-    let stat = rustix::fs::statx(
-        &pinned,
-        c"",
-        AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW,
-        STATX_MASK,
-    )
-    .map_err(|e| io(&current, e))?;
+    let stat = stat_pinned(&pinned, &current)?;
     if !Identity::of(&stat).matches(&expected, kind) {
         return Err(Error::Stale(current));
     }
@@ -1372,21 +1184,21 @@ fn restore_update(
         let (new_dirfd, new_name) = rename(&dirfd, &name, &current, original)?;
         dirfd = new_dirfd;
         name = new_name;
+        pinned = relocate(&pinned, &dirfd, &name, original)?;
     }
     if after.target.is_some()
         && let Some(target) = &before.target
     {
-        pinned = set_target(&dirfd, &name, original, target)?;
+        pinned = set_target(&dirfd, &name, original, target, original)?;
     }
     if after.mode.is_some()
         && let Some(mode) = before.mode
     {
-        set_mode(&pinned, &empty, original, kind, mode)?;
+        set_mode(&pinned, original, mode)?;
     }
     if after.uid.is_some() || after.gid.is_some() {
         set_owner(
             &pinned,
-            &empty,
             original,
             after.uid.and(before.uid),
             after.gid.and(before.gid),
@@ -1395,19 +1207,17 @@ fn restore_update(
     if after.atime.is_some() || after.mtime.is_some() {
         set_times(
             &pinned,
-            &empty,
             original,
             after.atime.and(before.atime),
             after.mtime.and(before.mtime),
         )?;
     }
-    rustix::fs::syncfs(&dirfd).map_err(|e| io(original, e))
+    sync_entry(&dirfd, &name, original)
 }
 
 fn restore_insert(path: &Path, kind: Kind, recorded: Identity) -> Result<()> {
     let (dirfd, name) = split(path)?;
-    let stat = rustix::fs::statx(&dirfd, &name, AtFlags::SYMLINK_NOFOLLOW, STATX_MASK)
-        .map_err(|e| io(path, e))?;
+    let stat = sys::stat_at(&dirfd, &name).map_err(|e| io(path, e))?;
     if !Identity::of(&stat).matches(&recorded, kind) {
         return Err(Error::Stale(path.to_path_buf()));
     }
@@ -1437,8 +1247,8 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
                 tomb,
                 ..
             } => {
-                let path = PathBuf::from(OsStr::from_bytes(path));
-                let tomb = tomb.as_deref().map(|t| PathBuf::from(OsStr::from_bytes(t)));
+                let path = path_from_bytes(path);
+                let tomb = tomb.as_deref().map(path_from_bytes);
                 let result = restore_delete(
                     &path,
                     kind_of(kind),
@@ -1456,7 +1266,7 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
                 identity,
                 ..
             } => {
-                let original = PathBuf::from(OsStr::from_bytes(path));
+                let original = path_from_bytes(path);
                 let result = restore_update(&original, kind_of(kind), before, after, *identity);
                 (original, result)
             }
@@ -1468,7 +1278,7 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
                 ctime,
                 ..
             } => {
-                let path = PathBuf::from(OsStr::from_bytes(path));
+                let path = path_from_bytes(path);
                 let recorded = Identity {
                     dev: *dev,
                     ino: *ino,
@@ -1480,10 +1290,8 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
         };
         match step {
             Ok(()) => {
-                if let Some(parent) = path.parent() {
-                    let fd = open_chain(parent)?;
-                    rustix::fs::syncfs(&fd).map_err(|e| io(&path, e))?;
-                }
+                let (dir, name) = split(&path)?;
+                sync_entry(&dir, &name, &path)?;
                 journal::finish_undo(base, id, record.seq())?;
                 outcome.applied += 1;
             }
@@ -1504,7 +1312,38 @@ pub fn undo(base: &Path, id: &str) -> Result<Outcome> {
 mod tests {
     use super::*;
     use crate::walk::WalkOptions;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+    fn stat(path: &Path) -> sys::Stat {
+        sys::stat_path(path, false).expect("stat")
+    }
+
+    fn mode(path: &Path) -> u32 {
+        stat(path).mode & 0o777
+    }
+
+    #[cfg(unix)]
+    fn shown(mode: u32, _directory: bool) -> u32 {
+        mode
+    }
+
+    #[cfg(windows)]
+    fn shown(mode: u32, directory: bool) -> u32 {
+        let base = if mode & 0o222 == 0 { 0o444 } else { 0o666 };
+        if directory { base | 0o111 } else { base }
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    #[cfg(windows)]
+    fn chmod(path: &Path, mode: u32) {
+        let mut permissions = std::fs::metadata(path).expect("meta").permissions();
+        permissions.set_readonly(mode & 0o222 == 0);
+        std::fs::set_permissions(path, permissions).expect("chmod");
+    }
 
     struct Fixture {
         dir: PathBuf,
@@ -1514,17 +1353,20 @@ mod tests {
 
     impl Fixture {
         fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("fsql-mutate-{}-{name}", std::process::id()));
+            let root = std::fs::canonicalize(std::env::temp_dir())
+                .expect("temp")
+                .join(format!("fsql-mutate-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let dir = root.join("tree");
-            std::fs::create_dir_all(dir.join("build/nested")).expect("dirs");
-            std::fs::create_dir_all(dir.join("src")).expect("dirs");
-            std::fs::write(dir.join("build/a.tmp"), vec![1u8; 100]).expect("file");
-            std::fs::write(dir.join("build/b.tmp"), vec![2u8; 200]).expect("file");
-            std::fs::write(dir.join("build/nested/c.tmp"), vec![3u8; 300]).expect("file");
-            std::fs::write(dir.join("src/keep.rs"), b"fn main() {}").expect("file");
-            symlink("keep.rs", dir.join("src/link")).expect("symlink");
+            let build = dir.join("build");
+            let src = dir.join("src");
+            std::fs::create_dir_all(build.join("nested")).expect("dirs");
+            std::fs::create_dir_all(&src).expect("dirs");
+            std::fs::write(build.join("a.tmp"), vec![1u8; 100]).expect("file");
+            std::fs::write(build.join("b.tmp"), vec![2u8; 200]).expect("file");
+            std::fs::write(build.join("nested").join("c.tmp"), vec![3u8; 300]).expect("file");
+            std::fs::write(src.join("keep.rs"), b"fn main() {}").expect("file");
+            sys::symlink_path(b"keep.rs", &dir.join("src").join("link")).expect("symlink");
             let base = root.join("journal");
             let dir = std::fs::canonicalize(dir).expect("canonical");
             let planner = Planner::new(&dir, WalkOptions::default());
@@ -1550,8 +1392,13 @@ mod tests {
             (outcome, journal.id().to_owned())
         }
 
+        fn at(&self, rel: &str) -> PathBuf {
+            rel.split('/')
+                .fold(self.dir.clone(), |path, part| path.join(part))
+        }
+
         fn exists(&self, rel: &str) -> bool {
-            std::fs::symlink_metadata(self.dir.join(rel)).is_ok()
+            std::fs::symlink_metadata(self.at(rel)).is_ok()
         }
     }
 
@@ -1564,7 +1411,7 @@ mod tests {
     #[test]
     fn narrowed_mutations_keep_source_relative_paths() {
         let fx = Fixture::new("relative-mutation");
-        let path = fx.dir.join("src/keep.rs");
+        let path = fx.at("src/keep.rs");
         for statement in ["delete from files", "update files set mode = 0o600"] {
             for (relative, expected) in [("keep.rs", 0), ("src/keep.rs", 1)] {
                 let resolved = fx.resolve(&format!(
@@ -1603,7 +1450,7 @@ mod tests {
         let outcome = apply_insert_observed(&entries, Some(&mut journal), |path| {
             std::fs::rename(path, &moved).unwrap();
             std::fs::write(path, b"unrelated replacement").unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+            chmod(path, 0o640);
         })
         .unwrap();
         assert_eq!(outcome.applied, 0);
@@ -1617,10 +1464,7 @@ mod tests {
             std::fs::read(&destination).unwrap(),
             b"unrelated replacement"
         );
-        assert_eq!(
-            std::fs::metadata(&destination).unwrap().mode() & 0o777,
-            0o640
-        );
+        assert_eq!(mode(&destination), shown(0o640, false));
         assert_eq!(std::fs::read(moved).unwrap(), b"original content");
         assert!(
             std::fs::read(journal.dir().join("log.jsonl"))
@@ -1629,10 +1473,12 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn failed_directory_sync_preserves_the_source_copy() {
+        use rustix::fs::{CWD, Mode, OFlags};
         let fx = Fixture::new("copy-sync-failure");
-        let source = fx.dir.join("src/keep.rs");
+        let source = fx.at("src/keep.rs");
         let destination = fx.dir.join("restored");
         // O_PATH supports openat but deliberately cannot be fsynced. This
         // injects a durability failure after the copied file has been flushed.
@@ -1645,8 +1491,8 @@ mod tests {
         .unwrap();
         let result = move_in(
             &source,
-            &dirfd,
-            &c_name(OsStr::new("restored"), &destination).unwrap(),
+            &Dir::from_fd(dirfd),
+            &sys::name_of(OsStr::new("restored"), &destination).unwrap(),
             &destination,
         );
         assert!(result.is_err());
@@ -1654,8 +1500,10 @@ mod tests {
         assert_eq!(std::fs::read(&destination).unwrap(), b"fn main() {}");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn cross_filesystem_delete_and_undo_preserve_content() {
+        use std::os::unix::fs::MetadataExt;
         let fx = Fixture::new("cross-device");
         if std::fs::metadata(&fx.dir).unwrap().dev() == std::fs::metadata("/dev/shm").unwrap().dev()
         {
@@ -1671,7 +1519,7 @@ mod tests {
         let undone = undo(&base, journal.id()).unwrap();
         assert_eq!(undone.applied, 1, "{:?}", undone.failures);
         assert_eq!(
-            std::fs::read(fx.dir.join("src/keep.rs")).unwrap(),
+            std::fs::read(fx.at("src/keep.rs")).unwrap(),
             b"fn main() {}"
         );
         std::fs::remove_dir_all(&base).unwrap();
@@ -1696,7 +1544,7 @@ mod tests {
         assert_eq!(undone.applied, 3, "{:?}", undone.failures);
         assert!(fx.exists("build/a.tmp"));
         assert_eq!(
-            std::fs::read(fx.dir.join("build/nested/c.tmp")).expect("read"),
+            std::fs::read(fx.at("build/nested/c.tmp")).expect("read"),
             vec![3u8; 300]
         );
         assert!(journal::list(&fx.base).expect("list").is_empty());
@@ -1720,7 +1568,7 @@ mod tests {
         let resolved = fx.resolve(
             "delete from files where size = (select max(size) from files where ext = 'tmp')",
         );
-        assert_eq!(resolved.paths()[0].0, fx.dir.join("build/nested/c.tmp"));
+        assert_eq!(resolved.paths()[0].0, fx.at("build/nested/c.tmp"));
         assert_eq!(resolved.len(), 1);
     }
 
@@ -1728,7 +1576,7 @@ mod tests {
     fn delete_aborts_entirely_when_a_target_changed() {
         let fx = Fixture::new("stale");
         let resolved = fx.resolve("delete from files where ext = 'tmp'");
-        std::fs::write(fx.dir.join("build/a.tmp"), b"changed").expect("rewrite");
+        std::fs::write(fx.at("build/a.tmp"), b"changed").expect("rewrite");
         let mut journal = Journal::open(&fx.base, "x").expect("journal");
         assert!(matches!(
             apply(&resolved, Some(&mut journal)),
@@ -1742,7 +1590,7 @@ mod tests {
     fn delete_ordered_with_limit_targets_the_largest_first() {
         let fx = Fixture::new("limit");
         let resolved = fx.resolve("delete from files where ext = 'tmp' order by size desc limit 1");
-        assert_eq!(resolved.paths()[0].0, fx.dir.join("build/nested/c.tmp"));
+        assert_eq!(resolved.paths()[0].0, fx.at("build/nested/c.tmp"));
     }
 
     #[test]
@@ -1752,12 +1600,10 @@ mod tests {
             fx.run("update files set mode = 0o600, name = 'renamed.rs' where name = 'keep.rs'");
         assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
         assert!(!fx.exists("src/keep.rs"));
-        let meta = std::fs::metadata(fx.dir.join("src/renamed.rs")).expect("meta");
-        assert_eq!(meta.mode() & 0o777, 0o600);
+        assert_eq!(mode(&fx.at("src/renamed.rs")), shown(0o600, false));
         let undone = undo(&fx.base, &id).expect("undo");
         assert_eq!(undone.applied, 1, "{:?}", undone.failures);
-        let meta = std::fs::metadata(fx.dir.join("src/keep.rs")).expect("meta");
-        assert_eq!(meta.mode() & 0o777, 0o644);
+        assert_eq!(mode(&fx.at("src/keep.rs")), shown(0o644, false));
     }
 
     #[test]
@@ -1766,17 +1612,19 @@ mod tests {
         let (outcome, _) =
             fx.run("update files set mtime = '2020-01-02T03:04:05Z' where name = 'keep.rs'");
         assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
-        let meta = std::fs::metadata(fx.dir.join("src/keep.rs")).expect("meta");
-        assert_eq!(meta.mtime(), 1_577_934_245);
+        assert_eq!(
+            stat(&fx.at("src/keep.rs")).mtime,
+            1_577_934_245 * time::NANOS_PER_SECOND
+        );
         let (outcome, id) = fx.run("update files set target = 'elsewhere' where name = 'link'");
         assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
         assert_eq!(
-            std::fs::read_link(fx.dir.join("src/link")).expect("link"),
+            std::fs::read_link(fx.at("src/link")).expect("link"),
             PathBuf::from("elsewhere")
         );
         undo(&fx.base, &id).expect("undo");
         assert_eq!(
-            std::fs::read_link(fx.dir.join("src/link")).expect("link"),
+            std::fs::read_link(fx.at("src/link")).expect("link"),
             PathBuf::from("keep.rs")
         );
         let resolved = fx.resolve("update files set mode = 0o600 where name = 'link'");
@@ -1789,18 +1637,14 @@ mod tests {
     fn insert_creates_dirs_files_and_symlinks_with_undo() {
         let fx = Fixture::new("insert");
         let sql = format!(
-            "insert into files (path, kind, mode, target) values ('{0}/newdir', 'dir', 0o700, null), ('{0}/newdir/file', 'file', null, null), ('{0}/newlink', 'symlink', null, 'newdir')",
-            fx.dir.display()
+            "insert into files (path, kind, mode, target) values ('{}', 'dir', 0o700, null), ('{}', 'file', null, null), ('{}', 'symlink', null, 'newdir')",
+            fx.at("newdir").display(),
+            fx.at("newdir/file").display(),
+            fx.at("newlink").display()
         );
         let (outcome, id) = fx.run(&sql);
         assert_eq!(outcome.applied, 3, "{:?}", outcome.failures);
-        assert_eq!(
-            std::fs::metadata(fx.dir.join("newdir"))
-                .expect("dir")
-                .mode()
-                & 0o777,
-            0o700
-        );
+        assert_eq!(mode(&fx.dir.join("newdir")), shown(0o700, true));
         assert!(fx.exists("newdir/file"));
         assert_eq!(
             std::fs::read_link(fx.dir.join("newlink")).expect("link"),
@@ -1821,28 +1665,22 @@ mod tests {
         let (outcome, _) = fx.run("insert into files (path, source) select path || '.bak', path from files where ext = 'rs'");
         assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
         assert_eq!(
-            std::fs::read(fx.dir.join("src/keep.rs.bak")).expect("read"),
+            std::fs::read(fx.at("src/keep.rs.bak")).expect("read"),
             b"fn main() {}"
         );
         let (outcome, _) = fx.run(&format!(
-            "insert into files (path, content, mode) values ('{}/src/gen.txt', 'hello', 0o600)",
-            fx.dir.display()
+            "insert into files (path, content, mode) values ('{}', 'hello', 0o600)",
+            fx.at("src/gen.txt").display()
         ));
         assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
-        assert_eq!(
-            std::fs::read(fx.dir.join("src/gen.txt")).expect("read"),
-            b"hello"
-        );
-        assert_eq!(
-            std::fs::metadata(fx.dir.join("src/gen.txt"))
-                .expect("meta")
-                .mode()
-                & 0o777,
-            0o600
-        );
+        assert_eq!(std::fs::read(fx.at("src/gen.txt")).expect("read"), b"hello");
+        assert_eq!(mode(&fx.at("src/gen.txt")), shown(0o600, false));
         let (outcome, _) = fx.run(&format!(
-            "insert into files (path, source) values ('{0}/build2', '{0}/build'), ('{0}/link2', '{0}/src/link')",
-            fx.dir.display()
+            "insert into files (path, source) values ('{}', '{}'), ('{}', '{}')",
+            fx.at("build2").display(),
+            fx.at("build").display(),
+            fx.at("link2").display(),
+            fx.at("src/link").display()
         ));
         assert_eq!(outcome.applied, 2, "{:?}", outcome.failures);
         assert!(
@@ -1865,24 +1703,147 @@ mod tests {
         assert!(!fx.exists("build/a.tmp"));
     }
 
+    #[cfg(unix)]
+    fn directory_link(path: &Path) -> bool {
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+    }
+
+    #[cfg(windows)]
+    fn directory_link(path: &Path) -> bool {
+        use std::os::windows::fs::FileTypeExt;
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink_dir())
+    }
+
+    #[test]
+    fn renaming_a_file_to_an_executable_extension_round_trips() {
+        let fx = Fixture::new("executable-name");
+        let (outcome, id) = fx.run("update files set name = 'keep.exe' where name = 'keep.rs'");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(fx.exists("src/keep.exe"));
+        let undone = undo(&fx.base, &id).expect("undo");
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert!(fx.exists("src/keep.rs"));
+    }
+
+    #[test]
+    fn timestamps_finer_than_the_filesystem_clock_apply_and_undo() {
+        let fx = Fixture::new("fine-times");
+        let original = stat(&fx.at("src/keep.rs")).mtime;
+        let (outcome, id) = fx.run(
+            "update files set mtime = '2020-01-02T03:04:05.000000123Z' where name = 'keep.rs'",
+        );
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert_eq!(
+            stat(&fx.at("src/keep.rs")).mtime,
+            sys::file_time(1_577_934_245_000_000_123)
+        );
+        let undone = undo(&fx.base, &id).expect("undo");
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert_eq!(stat(&fx.at("src/keep.rs")).mtime, original);
+    }
+
+    #[test]
+    fn unreadable_files_can_be_renamed_changed_deleted_and_restored() {
+        let fx = Fixture::new("unreadable");
+        chmod(&fx.at("src/keep.rs"), 0o000);
+        let resolved = fx.resolve("update files set name = 'kept.rs' where name = 'keep.rs'");
+        let outcome = apply(&resolved, None).expect("apply");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        let (outcome, _) = fx.run("update files set mode = 0o200 where name = 'kept.rs'");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert_eq!(mode(&fx.at("src/kept.rs")), shown(0o200, false));
+        let (outcome, id) = fx.run("delete from files where name = 'kept.rs'");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(!fx.exists("src/kept.rs"));
+        let undone = undo(&fx.base, &id).expect("undo");
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert_eq!(mode(&fx.at("src/kept.rs")), shown(0o200, false));
+    }
+
+    #[test]
+    fn directory_links_resolve_from_their_final_parent() {
+        let fx = Fixture::new("directory-links");
+        let up = |parts: &[&str]| {
+            parts
+                .iter()
+                .fold(PathBuf::from(".."), |path, part| path.join(part))
+                .display()
+                .to_string()
+        };
+        let (outcome, _) = fx.run(&format!(
+            "insert into files (path, kind, target) values ('{}', 'symlink', 'build')",
+            fx.at("dirlink").display()
+        ));
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        let (outcome, _) = fx.run(&format!(
+            "update files set target = '{}' where name = 'link'",
+            up(&["build"])
+        ));
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(directory_link(&fx.at("dirlink")));
+        assert!(directory_link(&fx.at("src/link")));
+        let resolved = fx.resolve(&format!(
+            "update files set target = '{}' where name = 'link'",
+            up(&["build", "nested"])
+        ));
+        let outcome = apply(&resolved, None).expect("apply");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(directory_link(&fx.at("src/link")));
+        assert_eq!(
+            std::fs::read_link(fx.at("src/link")).expect("link"),
+            PathBuf::from(up(&["build", "nested"]))
+        );
+        let (outcome, _) = fx.run(&format!(
+            "update files set target = 'nested', path = '{}' where name = 'link'",
+            fx.at("build/moved").display()
+        ));
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(directory_link(&fx.at("build/moved")));
+        let resolved = fx.resolve(&format!(
+            "update files set target = 'build', path = '{}' where name = 'moved'",
+            fx.at("rootlink").display()
+        ));
+        let outcome = apply(&resolved, None).expect("apply");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert!(directory_link(&fx.at("rootlink")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journaled_fifo_updates_apply_and_undo() {
+        let fx = Fixture::new("fifo");
+        let pipe = fx.at("src/pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        let original = mode(&pipe);
+        let (outcome, id) = fx.run("update files set mode = 0o600 where name = 'pipe'");
+        assert_eq!(outcome.applied, 1, "{:?}", outcome.failures);
+        assert_eq!(mode(&pipe), 0o600);
+        let undone = undo(&fx.base, &id).expect("undo");
+        assert_eq!(undone.applied, 1, "{:?}", undone.failures);
+        assert_eq!(mode(&pipe), original);
+    }
+
     #[test]
     fn copied_tombstones_keep_attributes() {
         let fx = Fixture::new("copy");
-        let file = fx.dir.join("src/keep.rs");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+        let file = fx.at("src/keep.rs");
+        chmod(&file, 0o440);
         let (dirfd, name) = split(&file).expect("split");
         let tomb = fx.base.join("tomb-copy");
         std::fs::create_dir_all(&fx.base).expect("base");
-        let original = std::fs::metadata(&file).expect("meta");
+        let original = stat(&file);
         move_out(&dirfd, &name, &file, &tomb).expect("move out");
-        let copied = std::fs::metadata(&tomb).expect("meta");
-        assert_eq!(copied.mode() & 0o777, 0o640);
-        assert_eq!(copied.mtime(), original.mtime());
+        let copied = stat(&tomb);
+        assert_eq!(copied.mode & 0o777, shown(0o440, false));
+        assert_eq!(copied.mtime, original.mtime);
         assert!(!file.exists());
         move_in(&tomb, &dirfd, &name, &file).expect("move in");
         assert!(!tomb.exists());
-        let restored = std::fs::metadata(&file).expect("meta");
-        assert_eq!(restored.mode() & 0o777, 0o640);
+        assert_eq!(mode(&file), shown(0o440, false));
         assert_eq!(std::fs::read(&file).expect("read"), b"fn main() {}");
     }
 }

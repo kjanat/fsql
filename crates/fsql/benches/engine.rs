@@ -1,7 +1,6 @@
 use std::fs;
 use std::hint::black_box;
 use std::ops::ControlFlow;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -24,7 +23,11 @@ impl Fixture {
             let extension = if index % 2 == 0 { "rs" } else { "txt" };
             let path = parent.join(format!("file-{index:04}.{extension}"));
             fs::write(&path, vec![b'x'; 64 + index % 1024]).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+            }
         }
         Self { directory, root }
     }
