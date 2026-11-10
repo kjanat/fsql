@@ -2,7 +2,7 @@
 
 > SQL over the filesystem.
 
-[![fsql on crates.io](https://img.shields.io/crates/v/fsql?label=fsql&logo=rust&labelColor=B7410E&color=black)][crates-fsql] [![fsql-cli on crates.io](https://img.shields.io/crates/v/fsql-cli?label=fsql-cli&logo=rust&labelColor=B7410E&color=black)][crates-fsql-cli] [![fsql-sqlparser on crates.io](https://img.shields.io/crates/v/fsql-sqlparser?label=fsql-sqlparser&logo=rust&labelColor=B7410E&color=black)][crates-fsql-sqlparser] [![License: MIT + Apache-2.0](https://img.shields.io/badge/license-MIT%20%2B%20Apache--2.0-blue)](#license)
+[![fsql on crates.io](https://img.shields.io/crates/v/fsql?label=fsql&logo=rust&labelColor=B7410E&color=black)][crates-fsql] [![fsql-sqlparser on crates.io](https://img.shields.io/crates/v/fsql-sqlparser?label=fsql-sqlparser&logo=rust&labelColor=B7410E&color=black)][crates-fsql-sqlparser] [![License: MIT + Apache-2.0](https://img.shields.io/badge/license-MIT%20%2B%20Apache--2.0-blue)](#license)
 
 <!--[![NPM](https://img.shields.io/npm/v/fsql?logo=npm&labelColor=CB3837&color=black)](https://npm.im/fsql)-->
 
@@ -59,10 +59,10 @@ fsql undo 18d32e8f3c07b302-129aef
 ## Install
 
 ```sh
-# cargo install --git https://github.com/kjanat/fsql fsql-cli[@<VER>] --bin fsql
-# e.g.
-cargo install --git https://github.com/kjanat/fsql fsql-cli --bin fsql
+cargo install fsql
 ```
+
+`cargo install --git https://github.com/kjanat/fsql fsql` installs the latest commit on `master`.
 
 ## Input
 
@@ -299,7 +299,7 @@ The [benchmark guide](benchmarks/README.md) covers repeatable CLI comparisons ag
 
 | Part                                  | License                                                                                                   |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `fsql`, `fsql-cli`, the Zed extension | MIT, [`LICENSE`](LICENSE) and [`editors/zed/LICENSE`](editors/zed/LICENSE)                                |
+| `fsql`, the Zed extension             | MIT, [`LICENSE`](LICENSE) and [`editors/zed/LICENSE`](editors/zed/LICENSE)                                |
 | `fsql-sqlparser` (`vendor/sqlparser`) | Apache-2.0, [`LICENSE.TXT`](vendor/sqlparser/LICENSE.TXT) and [`NOTICE.TXT`](vendor/sqlparser/NOTICE.TXT) |
 | `tree-sitter-fsql`                    | MIT, copyright Derek Stride, [`tree-sitter-fsql/LICENSE`](tree-sitter-fsql/LICENSE)                       |
 
@@ -312,5 +312,4 @@ The [benchmark guide](benchmarks/README.md) covers repeatable CLI comparisons ag
 [runnable examples]: examples/README.md
 
 [crates-fsql]: https://crates.io/crates/fsql
-[crates-fsql-cli]: https://crates.io/crates/fsql-cli
 [crates-fsql-sqlparser]: https://crates.io/crates/fsql-sqlparser

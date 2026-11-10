@@ -2,9 +2,23 @@
 name        = "fsql"
 version     = { workspace = true }
 edition     = { workspace = true }
-description = "SQL query and mutation engine over the filesystem"
+description = "Query and change the filesystem with SQL, from Rust or the fsql command"
 repository  = { workspace = true }
 license     = { workspace = true }
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ binary-ext }"
+pkg-fmt = "bin"
+
+[[bin]]
+doc               = false
+name              = "fsql"
+path              = "src/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name              = "query_files"
+required-features = ["cli"]
 
 [[bench]]
 harness = false
@@ -33,6 +47,8 @@ serde.workspace      = true
 serde_json.workspace = true
 uzers.workspace      = true
 
+clap = { workspace = true, optional = true }
+
 [dev-dependencies]
 criterion.workspace   = true
 ignore.workspace      = true
@@ -40,6 +56,10 @@ jwalk.workspace       = true
 stats_alloc.workspace = true
 tempfile.workspace    = true
 walkdir.workspace     = true
+
+[features]
+default = ["cli"]
+cli     = ["dep:clap"]
 
 [lints]
 workspace = true

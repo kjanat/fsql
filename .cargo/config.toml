@@ -5,7 +5,7 @@
 "bench:layers" = "bench --package fsql --bench layers --locked --"
 rr             = ["run", "--release"]
 
-"build:cli"        = ["build", "--release", "--package", "fsql-cli"]
+"build:cli"        = ["build", "--release", "--package", "fsql", "--bin", "fsql"]
 "build:cli:locked" = ["build:cli", "--locked"]
 "build:zed"        = ["build", "--package", "fsql-zed", "--target", "wasm32-wasip2"]
 "build:zed:locked" = ["build:zed", "--locked"]
@@ -14,15 +14,15 @@ rr             = ["run", "--release"]
 "lint:workspace"   = ["clippy", "--workspace", "--all-features", "--all-targets", "--locked"]
 "test:workspace"   = ["test", "--workspace", "--locked"]
 
-fsql         = ["rr", "--bin", "fsql", "--package", "fsql-cli", "--"]
-fsql-install = ["install", "--path=crates/fsql-cli", "--bin=fsql"]
+fsql         = ["rr", "--bin", "fsql", "--package", "fsql", "--"]
+fsql-install = ["install", "--path=crates/fsql", "--bin=fsql"]
 
 "bench:engine"    = ["bench", "--package", "fsql", "--bench", "engine", "--locked", "--"]
 "bench:traversal" = ["bench", "--package", "fsql", "--bench", "traversal", "--locked", "--"]
 "example:query"   = ["run", "--package", "fsql", "--example", "query", "--locked", "--"]
 "example:stream"  = ["run", "--package", "fsql", "--example", "stream", "--locked", "--"]
 "example:undo"    = ["run", "--package", "fsql", "--example", "mutate_and_undo", "--locked", "--"]
-"sandbox:fsql"    = ["run", "--config", ".cargo/sandbox.toml", "--package", "fsql-cli", "--locked", "--"]
+"sandbox:fsql"    = ["run", "--config", ".cargo/sandbox.toml", "--package", "fsql", "--bin", "fsql", "--locked", "--"]
 "sandbox:test"    = ["test", "--config", ".cargo/sandbox.toml", "--package", "fsql", "--test", "contracts", "--locked"]
 
 [env]
