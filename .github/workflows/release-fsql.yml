@@ -130,6 +130,7 @@ jobs:
         with:
           mode: apply
           context: ${{ steps.beepboop.outputs.context }}
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
       - name: Prepare and validate
         run: |
           cargo check --workspace --all-targets
