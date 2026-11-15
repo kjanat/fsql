@@ -10,6 +10,10 @@ license     = { workspace = true }
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ binary-ext }"
 pkg-fmt = "bin"
 
+[features]
+default = ["cli"]
+cli     = ["dep:clap"]
+
 [[bin]]
 doc               = false
 name              = "fsql"
@@ -74,10 +78,6 @@ renamore.workspace            = true
 winapi-util.workspace         = true
 windows-permissions.workspace = true
 windows-sys.workspace         = true
-
-[features]
-default = ["cli"]
-cli     = ["dep:clap"]
 
 [lints]
 workspace = true
