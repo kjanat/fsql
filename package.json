@@ -31,7 +31,7 @@
 		"tombi": "catalog:",
 		"typescript": "catalog:"
 	},
-	"packageManager": "bun@1.4.4",
+	"packageManager": "bun@1.4.5",
 	"devEngines": {
 		"packageManager": {
 			"name": "bun",
