@@ -3,8 +3,8 @@
   "streams": {
     "main": {
       "packages": ["pkg:cargo/fsql", "pkg:cargo/fsql-sqlparser"],
-      "versioning": "workspace",
-      "required": ["pkg:cargo/fsql", "pkg:cargo/fsql-sqlparser"],
+      "versionScope": "one-for-stream",
+      "mustPublish": ["pkg:cargo/fsql", "pkg:cargo/fsql-sqlparser"],
       "credentials": ["crates-io"],
       "prepare": {
         "strategy": "managed",
@@ -18,10 +18,10 @@
             "job": "prepare"
           }
         },
-        "bump": "pr"
+        "versionLands": "via-version-pr"
       },
       "promote": {
-        "approval": "merge",
+        "publishWhen": "version-pr-merged",
         "workflow": {
           "file": "release-fsql.yml",
           "ref": "master",
@@ -60,18 +60,13 @@
           }
         }
       },
-      "start": [
+      "startFrom": [
         {
           "via": "action",
           "workflow": "start-release.yml"
-        },
-        {
-          "via": "dashboard"
-        },
-        {
-          "via": "cli"
         }
-      ]
+      ],
+      "packageTags": ["pkg:cargo/fsql", "pkg:cargo/fsql-sqlparser"]
     }
   },
   "managers": ["cargo", "github-release", "workflow"]
