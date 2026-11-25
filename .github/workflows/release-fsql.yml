@@ -21,7 +21,7 @@ on:
 jobs:
   begin:
     name: Begin release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -52,27 +52,27 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-26.04
             target: x86_64-unknown-linux-gnu
             ext: ""
             asset: fsql-x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             target: aarch64-unknown-linux-gnu
             ext: ""
             asset: fsql-aarch64-unknown-linux-gnu
-          - runner: macos-15-intel
+          - runner: macos-26-intel
             target: x86_64-apple-darwin
             ext: ""
             asset: fsql-x86_64-apple-darwin
-          - runner: macos-latest
+          - runner: macos-26
             target: aarch64-apple-darwin
             ext: ""
             asset: fsql-aarch64-apple-darwin
-          - runner: windows-latest
+          - runner: windows-2025-vs2026
             target: x86_64-pc-windows-msvc
             ext: .exe
             asset: fsql-x86_64-pc-windows-msvc.exe
-          - runner: windows-11-arm
+          - runner: windows-11-vs2026-arm
             target: aarch64-pc-windows-msvc
             ext: .exe
             asset: fsql-aarch64-pc-windows-msvc.exe
@@ -81,6 +81,10 @@ jobs:
         with:
           ref: ${{ needs.begin.outputs.sourceSha }}
           persist-credentials: false
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-auditable@0.7.7
+          fallback: none
       - id: asset
         name: Name the release asset
         shell: bash
@@ -101,7 +105,7 @@ jobs:
           ASSET: ${{ steps.asset.outputs.name }}
         run: |
           rustup target add "${TARGET}"
-          cargo build --manifest-path "${MANIFEST}" --release --locked --bin "${BINARY}" --target "${TARGET}"
+          cargo auditable build --manifest-path "${MANIFEST}" --release --locked --bin "${BINARY}" --target "${TARGET}"
           target="$(cargo metadata --manifest-path "${MANIFEST}" --format-version 1 --no-deps | jq -r .target_directory)"
           cp "${target}/${TARGET}/release/${BINARY}${EXT}" "dist/${ASSET}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -177,6 +181,11 @@ jobs:
         run: |
           sha256sum -- * > checksums.txt
       - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        env:
+          SYFT_SOURCE_NAME: ${{ github.event.repository.name }}
+          SYFT_SOURCE_VERSION: ${{ fromJSON(steps.beepboop.outputs.context).version }}
+          SYFT_FILE_METADATA_SELECTION: all
+          SYFT_SELECT_CATALOGERS: -pe-package
         with:
           path: dist
           format: spdx-json
@@ -199,7 +208,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ fromJSON(steps.beepboop.outputs.context).draftRelease.tag }}
         run: |
-          gh release upload "${TAG}" -- *
+          gh release upload "${TAG}" --clobber -- *
       - id: beepboop_token
         uses: kjanat/beepboop/actions/token@v1
         with:
